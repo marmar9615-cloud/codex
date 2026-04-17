@@ -1,0 +1,29 @@
+modules = ["rust-stable", "python-3.12", "nodejs-20", "rust-nightly"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd codex-rs && cargo build -p codex-tui --bin codex-tui --ignore-rust-version 2>&1 && echo 'Build complete' && ./target/debug/codex-tui --help"
+
+[workflows.workflow.metadata]
+outputType = "console"

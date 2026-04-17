@@ -1613,6 +1613,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-home-dir",
  "dotenvy",
+ "libc",
  "tempfile",
  "tokio",
 ]
@@ -2178,6 +2179,7 @@ dependencies = [
  "anyhow",
  "clap",
  "codex-utils-absolute-path",
+ "libc",
  "multimap",
  "pretty_assertions",
  "serde",

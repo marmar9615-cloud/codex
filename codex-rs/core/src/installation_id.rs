@@ -10,6 +10,9 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio::fs;
 use uuid::Uuid;
@@ -29,7 +32,15 @@ pub(crate) async fn resolve_installation_id(codex_home: &AbsolutePathBuf) -> Res
         }
 
         let mut file = options.open(&path)?;
-        file.lock()?;
+        // Use libc flock as fallback for std::fs::File::lock (unstable in <1.89)
+        #[cfg(unix)]
+        {
+            let fd = file.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
 
         #[cfg(unix)]
         {

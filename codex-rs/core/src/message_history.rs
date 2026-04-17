@@ -25,6 +25,7 @@ use std::io::Result;
 use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -134,21 +135,26 @@ pub async fn append_entry(text: &str, conversation_id: &ThreadId, config: &Confi
     tokio::task::spawn_blocking(move || -> Result<()> {
         // Retry a few times to avoid indefinite blocking when contended.
         for _ in 0..MAX_RETRIES {
-            match history_file.try_lock() {
-                Ok(()) => {
-                    // While holding the exclusive lock, write the full line.
-                    // We do not open the file with `append(true)` on Windows, so ensure the
-                    // cursor is positioned at the end before writing.
-                    history_file.seek(SeekFrom::End(0))?;
-                    history_file.write_all(line.as_bytes())?;
-                    history_file.flush()?;
-                    enforce_history_limit(&mut history_file, history_max_bytes)?;
-                    return Ok(());
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
+            // Use libc flock as fallback for std::fs::File::try_lock (unstable in <1.89)
+            let fd = history_file.as_raw_fd();
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if ret == 0 {
+                // While holding the exclusive lock, write the full line.
+                // We do not open the file with `append(true)` on Windows, so ensure the
+                // cursor is positioned at the end before writing.
+                history_file.seek(SeekFrom::End(0))?;
+                history_file.write_all(line.as_bytes())?;
+                history_file.flush()?;
+                enforce_history_limit(&mut history_file, history_max_bytes)?;
+                unsafe { libc::flock(fd, libc::LOCK_UN) };
+                return Ok(());
+            } else {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
                     std::thread::sleep(RETRY_SLEEP);
+                } else {
+                    return Err(err);
                 }
-                Err(e) => return Err(e.into()),
             }
         }
 
@@ -356,38 +362,42 @@ fn lookup_history_entry(path: &Path, log_id: u64, offset: usize) -> Option<Histo
     // Open & lock file for reading using a shared lock.
     // Retry a few times to avoid indefinite blocking.
     for _ in 0..MAX_RETRIES {
-        let lock_result = file.try_lock_shared();
+        // Use libc flock as fallback for std::fs::File::try_lock_shared (unstable in <1.89)
+        let fd = file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) };
+        if ret == 0 {
+            let reader = BufReader::new(&file);
+            for (idx, line_res) in reader.lines().enumerate() {
+                let line = match line_res {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to read line from history file");
+                        unsafe { libc::flock(fd, libc::LOCK_UN) };
+                        return None;
+                    }
+                };
 
-        match lock_result {
-            Ok(()) => {
-                let reader = BufReader::new(&file);
-                for (idx, line_res) in reader.lines().enumerate() {
-                    let line = match line_res {
-                        Ok(l) => l,
+                if idx == offset {
+                    let result = match serde_json::from_str::<HistoryEntry>(&line) {
+                        Ok(entry) => Some(entry),
                         Err(e) => {
-                            tracing::warn!(error = %e, "failed to read line from history file");
-                            return None;
+                            tracing::warn!(error = %e, "failed to parse history entry");
+                            None
                         }
                     };
-
-                    if idx == offset {
-                        match serde_json::from_str::<HistoryEntry>(&line) {
-                            Ok(entry) => return Some(entry),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to parse history entry");
-                                return None;
-                            }
-                        }
-                    }
+                    unsafe { libc::flock(fd, libc::LOCK_UN) };
+                    return result;
                 }
-                // Not found at requested offset.
-                return None;
             }
-            Err(std::fs::TryLockError::WouldBlock) => {
+            // Not found at requested offset.
+            unsafe { libc::flock(fd, libc::LOCK_UN) };
+            return None;
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
                 std::thread::sleep(RETRY_SLEEP);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to acquire shared lock on history file");
+            } else {
+                tracing::warn!(error = %err, "failed to acquire shared lock on history file");
                 return None;
             }
         }

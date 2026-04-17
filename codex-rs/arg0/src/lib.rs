@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::future::Future;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -309,7 +310,14 @@ pub fn prepend_path_entry_for_codex_aliases() -> std::io::Result<Arg0PathEntryGu
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock_file.try_lock()?;
+    // Use libc flock as a fallback for std::fs::File::try_lock (unstable in <1.89)
+    {
+        let fd = lock_file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
 
     for filename in &[
         APPLY_PATCH_ARG0,
@@ -428,10 +436,18 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<File>> {
         Err(err) => return Err(err),
     };
 
-    match lock_file.try_lock() {
-        Ok(()) => Ok(Some(lock_file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(err) => Err(err.into()),
+    // Use libc flock(LOCK_NB) as a fallback for std::fs::File::try_lock (unstable in <1.89)
+    {
+        let fd = lock_file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret == 0 {
+            return Ok(Some(lock_file));
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(None);
+        }
+        return Err(err);
     }
 }
 
