@@ -73,7 +73,7 @@ export const state = {
     { name: "/status", desc: "Show current account, model, and policy" },
     { name: "/ps", desc: "Show tracked background or interactive sessions" },
     { name: "/stop", desc: "Stop tracked background or interactive sessions" },
-    { name: "/login", desc: "Sign in with an OpenAI API key" },
+    { name: "/login", desc: "Open the sign-in modal" },
     { name: "/logout", desc: "Sign out and clear credentials" },
     { name: "/clear", desc: "Clear the current transcript view" },
     { name: "/reset", desc: "Reset the current conversation context" },

@@ -4,6 +4,8 @@
 no mock backend path anymore: local development, Playwright smoke tests, and
 Replit deployment all require a real `codex` or `codex-app-server` binary.
 
+Release criteria live in [RELEASE_CHECKLIST.md](/Users/marmar/Desktop/codex/web/RELEASE_CHECKLIST.md).
+
 ## Quickstart
 
 Local with the installed multitool binary:
@@ -17,7 +19,7 @@ CODEX_BIN="$HOME/.local/bin/codex" npm start
 Local with a standalone app-server build:
 
 ```bash
-cd /Users/marmar/Desktop/codex
+cd /path/to/codex
 ./web/scripts/build-codex-bin.sh
 cd web
 CODEX_BIN="$HOME/codex-bin/codex-app-server" npm start
@@ -31,29 +33,35 @@ The app serves HTTP + WebSocket traffic on port `5000` by default.
 - Each browser session gets its own workdir under `web/.workdirs/<sessionId>/`.
 - Each session owns one backend child process; reconnecting the browser does not
   recycle the child unless the session logs out or idles out.
-- The gateway owns API keys, ChatGPT device-code state, refresh tokens, uploads,
-  and workdir file serving.
+- The gateway owns API keys, non-local ChatGPT device-code state, refresh
+  tokens, uploads, and workdir file serving.
 
 ## Auth
 
 Two auth modes are supported:
 
 - API key: `POST /api/login`
-- ChatGPT device code: `POST /api/oauth/chatgpt/start`
+- ChatGPT browser callback on localhost via `account/login/start { type: "chatgpt" }`
+- ChatGPT device code on non-local/public deployments via `POST /api/oauth/chatgpt/start`
 
-For ChatGPT auth, the gateway starts the device-code flow, stores the refresh
-token in memory, and logs the backend in through
-`account/login/start { type: "chatgptAuthTokens", ... }`. When the backend later
-requests `account/chatgptAuthTokens/refresh`, the browser calls the gateway’s
-`POST /api/oauth/chatgpt/refresh` endpoint and replies with fresh external auth
-tokens.
+ChatGPT auth is split by host:
+
+- Localhost: the browser asks app-server for `type: "chatgpt"` and opens the
+  returned callback URL in a new tab.
+- Non-local/public deployments: the gateway starts the device-code flow, stores
+  the refresh token in memory, and logs the backend in through
+  `account/login/start { type: "chatgptAuthTokens", ... }`.
+
+When the backend later requests `account/chatgptAuthTokens/refresh`, the
+browser calls the gateway’s `POST /api/oauth/chatgpt/refresh` endpoint and
+replies with fresh external auth tokens.
 
 High-level flow:
 
 ```text
 Browser -> /api/oauth/chatgpt/start -> Gateway
 Gateway -> auth.openai.com device-code endpoints
-User enters device code in browser
+User enters device code in browser on the public deployment
 Gateway exchanges code for tokens and stores refresh token
 Gateway -> app-server account/login/start(chatgptAuthTokens)
 Browser answers future account/chatgptAuthTokens/refresh requests via /api/oauth/chatgpt/refresh
@@ -101,12 +109,23 @@ cd web
 CODEX_BIN="$HOME/.local/bin/codex" PLAYWRIGHT_AUTH=1 npm run test:e2e:auth
 ```
 
+To run the deterministic authenticated workflow smoke, also provide a real API
+key:
+
+```bash
+cd web
+CODEX_BIN="$HOME/.local/bin/codex" PLAYWRIGHT_AUTH=1 PLAYWRIGHT_API_KEY="$OPENAI_API_KEY" npm run test:e2e:auth
+```
+
+See [RELEASE_CHECKLIST.md](/Users/marmar/Desktop/codex/web/RELEASE_CHECKLIST.md) for the manual ChatGPT auth,
+refresh, and Replit release gates.
+
 ## Replit
 
 Build the standalone backend once on Replit:
 
 ```bash
-cd /Users/marmar/Desktop/codex
+cd /path/to/codex
 ./web/scripts/build-codex-bin.sh
 ```
 
@@ -116,3 +135,6 @@ Then start the app with:
 cd web
 CODEX_BIN="$HOME/codex-bin/codex-app-server" npm start
 ```
+
+Public Replit deployments use the device-code auth flow. Localhost keeps the
+browser callback flow.

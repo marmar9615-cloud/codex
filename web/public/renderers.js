@@ -603,7 +603,7 @@ export function createRenderers({
     card.innerHTML = `
       <div class="ap-head">OpenAI authentication required</div>
       <div class="ap-body">
-        <div>Sign in with ChatGPT or use an API key before sending another turn.</div>
+        <div>Sign in with ChatGPT in this browser or use an API key before sending another turn.</div>
         <div class="tc-meta">${escapeHtml(message ?? "The backend rejected the request as unauthenticated.")}</div>
       </div>
       <div class="ap-actions">

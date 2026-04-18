@@ -188,7 +188,7 @@ export function createModals({
   function openLogin() {
     modal(`
       <h2>Sign in to Codex</h2>
-      <p>Choose a sign-in method. Credentials stay on the gateway and are tied to your session cookie.</p>
+      <p>Choose a sign-in method. On localhost, ChatGPT opens a browser callback. On public deployments, you’ll get a device code. Credentials stay tied to your session cookie.</p>
       <div class="modal-row">
         <button id="chatgpt" class="primary" style="width:100%">Sign in with ChatGPT</button>
       </div>
