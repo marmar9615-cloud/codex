@@ -52,6 +52,9 @@ const state = {
   ],
 };
 
+// Expose for end-to-end tests (transport-drop simulation, etc.).
+if (typeof window !== "undefined") window.state = state;
+
 function load(key, fallback) {
   try { return { ...fallback, ...(JSON.parse(localStorage.getItem(key) ?? "{}")) }; }
   catch { return fallback; }

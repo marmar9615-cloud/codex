@@ -7,15 +7,14 @@
 // HTTP only (`/api/whoami`); spawn/exit/log information stays on the server
 // (stderr / process logs).
 //
-// Per WebSocket the gateway:
-//   1. authenticates the cookie session,
-//   2. spawns one `codex app-server` (or the bundled mock) bound to that
-//      session's auth + workdir,
-//   3. on spawn, if an API key is set, sends a single canonical
-//      `account/login/start` request with `{type: "apiKey", apiKey}` to
-//      the child (still inside the protocol; no custom envelope),
-//   4. then pipes raw JSON-RPC frames between the WS and the child stdio
-//      until either side closes.
+// The backend `codex app-server` child is owned by the SESSION, not by an
+// individual WebSocket. A transient WS drop simply detaches; the child
+// (and its in-flight turn) keeps running. On reconnect the gateway
+// replays the most recent backend → client JSON-RPC frames so the UI
+// can resume mid-turn without losing streamed content. Children are
+// idle-killed only when no WS has been attached for a few minutes, and
+// they are FORCE killed immediately on `/api/logout` so credentials
+// can never serve a subsequent turn after the user signs out.
 //
 // Backend selection:
 //   - real:  $CODEX_BIN exists. Spawns `$CODEX_BIN app-server`. The browser
@@ -80,8 +79,16 @@ function makeSession(id) {
     createdAt: Date.now(), lastSeenAt: Date.now(), workdir,
     threads: new Map(),
     activeThreadId: undefined,
+    // Per-session backend child + reconnect bookkeeping.
+    backend: null, // { child, kind, buf, outFrames: string[], attachedWs, idleTimer }
   };
 }
+
+// Maximum number of recent backend → client JSON-RPC frames kept per session
+// for transparent replay on WS reconnect.
+const REPLAY_RING_SIZE = 500;
+// Time a backend may sit idle (no attached WS) before it is recycled.
+const BACKEND_IDLE_MS = 5 * 60 * 1000;
 
 function isSecureRequest(req) {
   // Trust the standard reverse-proxy header used by Replit and most
@@ -169,6 +176,11 @@ app.post("/api/login", sameOriginOnly, (req, res) => {
 app.post("/api/logout", sameOriginOnly, (req, res) => {
   const s = getOrCreateSession(req, res);
   s.apiKey = undefined; s.oauth = undefined;
+  // SECURITY: any in-flight backend child was spawned with the now-revoked
+  // credentials in its env. Force-kill it so it cannot serve any further
+  // authenticated turns. The next WS message will spawn a fresh,
+  // unauthenticated child.
+  killBackend(s, "logout");
   res.json({ ok: true });
 });
 
@@ -230,162 +242,211 @@ server.on("upgrade", (req) => {
 wss.on("connection", (ws, req) => {
   const session = getSessionFromCookie(req.headers.cookie);
   if (!session) {
-    // No protocol payload — close with a clear code so the client reconnects.
     ws.close(4401, "no session");
     return;
   }
-  new BridgeConnection(ws, session);
+  attachWs(session, ws);
 });
 
-class BridgeConnection {
-  constructor(ws, session) {
-    this.ws = ws;
-    this.session = session;
-    this.kind = backendKindFor();
-    this.child = null;
-    this.buf = "";
-    this.spawn();
-    ws.on("message", (raw) => this.onWsMessage(raw));
-    ws.on("close", () => this.killChild());
-    ws.on("error", () => this.killChild());
+// ---------- per-session backend lifecycle ----------
+
+function ensureBackend(session) {
+  if (session.backend && session.backend.child && !session.backend.child.killed) {
+    return session.backend;
+  }
+  const kind = backendKindFor();
+  const env = { ...process.env, CODEX_HOME: join(session.workdir, ".codex") };
+  if (session.apiKey) env.OPENAI_API_KEY = session.apiKey;
+  if (session.oauth?.token) env.CODEX_AUTH_TOKEN = session.oauth.token;
+
+  let bin, args;
+  if (kind === "real") {
+    bin = CODEX_BIN;
+    args = ["app-server"];
+  } else {
+    bin = process.execPath;
+    args = [MOCK_BIN];
+    env.MOCK_WORKDIR = session.workdir;
+    env.MOCK_HAS_AUTH = (session.apiKey || session.oauth?.token) ? "1" : "0";
   }
 
-  spawn() {
-    const env = { ...process.env, CODEX_HOME: join(this.session.workdir, ".codex") };
-    if (this.session.apiKey) env.OPENAI_API_KEY = this.session.apiKey;
-    if (this.session.oauth?.token) env.CODEX_AUTH_TOKEN = this.session.oauth.token;
+  let child;
+  try {
+    child = spawn(bin, args, { env, cwd: session.workdir, stdio: ["pipe", "pipe", "pipe"] });
+  } catch (err) {
+    console.error("[codex-web] failed to spawn backend:", err.message);
+    return null;
+  }
 
-    let bin, args;
-    if (this.kind === "real") {
-      bin = CODEX_BIN;
-      args = ["app-server"];
-    } else {
-      bin = process.execPath;
-      args = [MOCK_BIN];
-      env.MOCK_WORKDIR = this.session.workdir;
-      env.MOCK_HAS_AUTH = (this.session.apiKey || this.session.oauth?.token) ? "1" : "0";
-    }
-    try {
-      this.child = spawn(bin, args, { env, cwd: this.session.workdir, stdio: ["pipe", "pipe", "pipe"] });
-    } catch (err) {
-      console.error("[codex-web] failed to spawn backend:", err.message);
-      // Close the WS with a non-1000 code; the client reconnects.
-      try { this.ws.close(4500, `spawn failed: ${err.message}`); } catch {}
-      return;
-    }
+  const backend = {
+    child, kind, buf: "",
+    // Ring buffer of recent backend → client JSON-RPC frames (raw strings).
+    outFrames: [],
+    attachedWs: null,
+    idleTimer: null,
+  };
+  session.backend = backend;
 
-    this.child.stdout.on("data", (chunk) => this.onChildData(chunk));
-    this.child.stderr.on("data", (chunk) => {
-      // Surface backend stderr only to the gateway's own log.
-      process.stderr.write(`[codex backend ${this.session.id.slice(0,8)}] ${chunk}`);
+  child.stdout.on("data", (chunk) => onChildData(session, chunk));
+  child.stderr.on("data", (chunk) => {
+    process.stderr.write(`[codex backend ${session.id.slice(0,8)}] ${chunk}`);
+  });
+  child.on("exit", (code, signal) => {
+    if (session.backend === backend) session.backend = null;
+    const ws = backend.attachedWs;
+    if (ws) {
+      try { ws.close(4502, `backend exited code=${code ?? "?"} signal=${signal ?? "?"}`); } catch {}
+    }
+  });
+  child.on("error", (err) => {
+    console.error("[codex-web] child error:", err.message);
+    if (session.backend === backend) session.backend = null;
+  });
+
+  // Pre-seed API-key auth via canonical JSON-RPC.
+  if (session.apiKey) {
+    writeChild(backend, {
+      jsonrpc: "2.0", id: `gw-${randomUUID()}`,
+      method: "account/login/start",
+      params: { type: "apiKey", apiKey: session.apiKey },
     });
-    this.child.on("exit", (code, signal) => {
-      this.child = null;
-      try { this.ws.close(4502, `backend exited code=${code ?? "?"} signal=${signal ?? "?"}`); } catch {}
-    });
-    this.child.on("error", (err) => {
-      console.error("[codex-web] child error:", err.message);
-      try { this.ws.close(4500, `child error: ${err.message}`); } catch {}
-    });
+  }
+  return backend;
+}
 
-    // Pre-seed auth via canonical JSON-RPC. Still strictly app-server-protocol.
-    if (this.session.apiKey) {
-      this.writeChild({
-        jsonrpc: "2.0", id: `gw-${randomUUID()}`,
-        method: "account/login/start",
-        params: { type: "apiKey", apiKey: this.session.apiKey },
-      });
-    }
+function killBackend(session, reason) {
+  const b = session.backend;
+  if (!b) return;
+  if (b.idleTimer) { clearTimeout(b.idleTimer); b.idleTimer = null; }
+  const c = b.child;
+  if (c && !c.killed) {
+    process.stderr.write(`[codex-web] killing backend (${reason}) for session ${session.id.slice(0,8)}\n`);
+    try { c.kill("SIGTERM"); } catch {}
+    setTimeout(() => { try { if (!c.killed) c.kill("SIGKILL"); } catch {} }, 3000).unref();
+  }
+  if (b.attachedWs) {
+    try { b.attachedWs.close(4001, `backend recycled: ${reason}`); } catch {}
+  }
+  session.backend = null;
+}
+
+function attachWs(session, ws) {
+  const backend = ensureBackend(session);
+  if (!backend) {
+    try { ws.close(4500, "spawn failed"); } catch {}
+    return;
+  }
+  // Detach any previous WS (typically already closed on the client).
+  if (backend.attachedWs && backend.attachedWs !== ws) {
+    try { backend.attachedWs.close(4000, "superseded"); } catch {}
+  }
+  backend.attachedWs = ws;
+  if (backend.idleTimer) { clearTimeout(backend.idleTimer); backend.idleTimer = null; }
+
+  // Replay buffered frames so the UI can resume mid-turn after a transport
+  // drop. The client-side reducers are idempotent on item.id, so duplicate
+  // notifications are harmless.
+  for (const frame of backend.outFrames) {
+    try { ws.send(frame); } catch {}
   }
 
-  onChildData(chunk) {
-    this.buf += chunk.toString("utf8");
-    let nl;
-    while ((nl = this.buf.indexOf("\n")) >= 0) {
-      const line = this.buf.slice(0, nl).trim();
-      this.buf = this.buf.slice(nl + 1);
-      if (!line) continue;
-      let parsed;
-      try { parsed = JSON.parse(line); } catch {
-        // Non-JSON output from the child is a backend log — keep it server-side.
-        process.stderr.write(`[codex backend ${this.session.id.slice(0,8)} stdout] ${line}\n`);
-        continue;
-      }
-      if (!parsed || (parsed.jsonrpc !== "2.0" && parsed.jsonrpc !== undefined)) continue;
-      // Forward verbatim — no rewriting.
-      try { if (this.ws.readyState === this.ws.OPEN) this.ws.send(line); } catch {}
-      this.observeForSession(parsed);
-    }
-  }
+  ws.on("message", (raw) => onWsMessage(session, backend, raw));
+  ws.on("close", () => detachWs(session, backend, ws));
+  ws.on("error", () => detachWs(session, backend, ws));
+}
 
-  // Server-side observers that update session bookkeeping (thread list,
-  // OAuth token cache). They do NOT modify or replace the forwarded frame.
-  observeForSession(msg) {
-    // `thread/started` carries `{ thread: Thread }` per v2 schema.
-    if (msg.method === "thread/started" && msg.params?.thread?.id) {
-      const t = msg.params.thread;
-      const existing = this.session.threads.get(t.id)
-        ?? { id: t.id, name: t.name ?? t.id, lastActive: Date.now() };
-      existing.name = t.name ?? existing.name;
-      existing.lastActive = Date.now();
-      this.session.threads.set(t.id, existing);
-      this.session.activeThreadId = t.id;
+function detachWs(session, backend, ws) {
+  if (backend.attachedWs !== ws) return;
+  backend.attachedWs = null;
+  // Don't kill the child immediately — let the in-flight turn keep running so
+  // the next reconnect can replay it. Idle-kill after a few minutes.
+  if (backend.idleTimer) clearTimeout(backend.idleTimer);
+  backend.idleTimer = setTimeout(() => {
+    if (session.backend === backend && !backend.attachedWs) {
+      killBackend(session, "idle");
     }
-    // `account/updated` carries `{ authMode, planType }` per v2 schema.
-    if (msg.method === "account/updated") {
-      const authMode = msg.params?.authMode ?? null;
-      const planType = msg.params?.planType ?? null;
-      if (authMode === "chatgpt" || authMode === "chatgptAuthTokens") {
-        this.session.oauth = {
-          ...(this.session.oauth ?? {}),
-          account: planType ? `chatgpt:${planType}` : "chatgpt",
-          token: this.session.oauth?.token ?? "oauth-set",
-          authMode, planType, pending: false,
-        };
-      } else if (authMode === "apikey") {
-        // Real backend confirmed the API-key login; nothing to persist beyond
-        // what we already hold in the session.
-        this.session.oauth = undefined;
-      } else if (authMode === null) {
-        this.session.oauth = undefined;
-      }
-    }
-  }
+  }, BACKEND_IDLE_MS).unref();
+}
 
-  onWsMessage(raw) {
-    if (!this.child || !this.child.stdin || this.child.stdin.destroyed) return;
-    let s;
-    try { s = raw.toString("utf8"); } catch { return; }
-    // Validate it's a JSON-RPC frame. Drop anything else — strict protocol.
+function onChildData(session, chunk) {
+  const backend = session.backend;
+  if (!backend) return;
+  backend.buf += chunk.toString("utf8");
+  let nl;
+  while ((nl = backend.buf.indexOf("\n")) >= 0) {
+    const line = backend.buf.slice(0, nl).trim();
+    backend.buf = backend.buf.slice(nl + 1);
+    if (!line) continue;
     let parsed;
-    try { parsed = JSON.parse(s); } catch { return; }
-    if (!parsed || parsed.jsonrpc !== "2.0") return;
-    // Track outgoing turn intent so we can name the thread on first user turn.
-    const activeId = parsed.params?.threadId ?? this.session.activeThreadId;
-    if (parsed.method === "turn/start" && activeId) {
-      const t = this.session.threads.get(activeId);
-      if (t) {
-        const text = (parsed.params?.input ?? []).map((p) => p?.text ?? "").join(" ").trim();
-        if (text && (!t.name || t.name === t.id)) t.name = text.slice(0, 48);
-        t.lastActive = Date.now();
-      }
+    try { parsed = JSON.parse(line); } catch {
+      process.stderr.write(`[codex backend ${session.id.slice(0,8)} stdout] ${line}\n`);
+      continue;
     }
-    try { this.child.stdin.write(s + "\n"); } catch {}
-  }
-
-  writeChild(obj) {
-    if (!this.child || !this.child.stdin || this.child.stdin.destroyed) return;
-    try { this.child.stdin.write(JSON.stringify(obj) + "\n"); } catch {}
-  }
-
-  killChild() {
-    const c = this.child;
-    if (c && !c.killed) {
-      try { c.kill("SIGTERM"); } catch {}
-      setTimeout(() => { try { if (!c.killed) c.kill("SIGKILL"); } catch {} }, 3000).unref();
+    if (!parsed || (parsed.jsonrpc !== "2.0" && parsed.jsonrpc !== undefined)) continue;
+    // Buffer for replay, then forward verbatim — no rewriting.
+    backend.outFrames.push(line);
+    if (backend.outFrames.length > REPLAY_RING_SIZE) backend.outFrames.shift();
+    const ws = backend.attachedWs;
+    if (ws && ws.readyState === ws.OPEN) {
+      try { ws.send(line); } catch {}
     }
-    this.child = null;
+    observeForSession(session, parsed);
   }
+}
+
+function observeForSession(session, msg) {
+  if (msg.method === "thread/started" && msg.params?.thread?.id) {
+    const t = msg.params.thread;
+    const existing = session.threads.get(t.id)
+      ?? { id: t.id, name: t.name ?? t.id, lastActive: Date.now() };
+    existing.name = t.name ?? existing.name;
+    existing.lastActive = Date.now();
+    session.threads.set(t.id, existing);
+    session.activeThreadId = t.id;
+    // Resetting the replay ring at a new thread keeps the buffer focused on
+    // the most recent turn so reconnects don't replay stale prior turns.
+    if (session.backend) session.backend.outFrames = [];
+  }
+  if (msg.method === "account/updated") {
+    const authMode = msg.params?.authMode ?? null;
+    const planType = msg.params?.planType ?? null;
+    if (authMode === "chatgpt" || authMode === "chatgptAuthTokens") {
+      session.oauth = {
+        ...(session.oauth ?? {}),
+        account: planType ? `chatgpt:${planType}` : "chatgpt",
+        token: session.oauth?.token ?? "oauth-set",
+        authMode, planType, pending: false,
+      };
+    } else if (authMode === "apikey") {
+      session.oauth = undefined;
+    } else if (authMode === null) {
+      session.oauth = undefined;
+    }
+  }
+}
+
+function onWsMessage(session, backend, raw) {
+  if (!backend.child || !backend.child.stdin || backend.child.stdin.destroyed) return;
+  let s;
+  try { s = raw.toString("utf8"); } catch { return; }
+  let parsed;
+  try { parsed = JSON.parse(s); } catch { return; }
+  if (!parsed || parsed.jsonrpc !== "2.0") return;
+  const activeId = parsed.params?.threadId ?? session.activeThreadId;
+  if (parsed.method === "turn/start" && activeId) {
+    const t = session.threads.get(activeId);
+    if (t) {
+      const text = (parsed.params?.input ?? []).map((p) => p?.text ?? "").join(" ").trim();
+      if (text && (!t.name || t.name === t.id)) t.name = text.slice(0, 48);
+      t.lastActive = Date.now();
+    }
+  }
+  try { backend.child.stdin.write(s + "\n"); } catch {}
+}
+
+function writeChild(backend, obj) {
+  if (!backend.child || !backend.child.stdin || backend.child.stdin.destroyed) return;
+  try { backend.child.stdin.write(JSON.stringify(obj) + "\n"); } catch {}
 }
 
 server.listen(PORT, HOST, () => {
