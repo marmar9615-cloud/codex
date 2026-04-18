@@ -299,6 +299,20 @@ rl.on("line", (line) => {
       respond(msg.id, { abortReason: "user_interrupt" });
       return;
 
+    case "thread/interrupt":
+      respond(msg.id, { ok: true });
+      return;
+
+    case "thread/compact": {
+      const conversationId = msg.params?.conversationId;
+      respond(msg.id, { conversationId, compactedItems: 0 });
+      return;
+    }
+
+    case "config/value/write":
+      respond(msg.id, { ok: true });
+      return;
+
     case "serverRequest/resolved":
       // Notification only; nothing to do here.
       return;

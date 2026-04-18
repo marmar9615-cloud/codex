@@ -18,7 +18,7 @@ test.describe("Codex Web — JSON-RPC end-to-end", () => {
   test("sign in with ChatGPT, approve a command, see streamed reply", async ({ page }) => {
     await page.goto(BASE_URL);
 
-    // Wait for the WebSocket to connect and `gateway/ready` to populate the bar.
+    // Wait for the status bar to populate from /api/whoami.
     await expect(page.locator("#backend-pill")).toContainText(/backend:/, { timeout: 10_000 });
 
     // Open the login modal and start the ChatGPT (device-code) flow.

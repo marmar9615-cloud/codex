@@ -1,30 +1,31 @@
 // Codex Web — JSON-RPC bridge to the Rust `codex app-server`.
 //
-// Architecture:
-//   browser  <— WebSocket (raw JSON-RPC frames) —>  this gateway
-//   this gateway  <— stdio (newline-delimited JSON-RPC frames) —>  `codex app-server`
+// The gateway is a TRANSPARENT JSON-RPC 2.0 proxy. Every byte that crosses
+// the WebSocket is a single canonical app-server-protocol JSON-RPC frame.
+// The gateway never invents methods, never renames fields, and never wraps
+// payloads. Operational metadata (backend kind, workdir) is exposed via
+// HTTP only (`/api/whoami`); spawn/exit/log information stays on the server
+// (stderr / process logs).
 //
-// The gateway is a minimal authenticated transport. Every WebSocket frame is
-// a single JSON-RPC 2.0 message conforming to `app-server-protocol`
-// (`codex-rs/app-server-protocol`). The gateway does not invent new methods,
-// rename fields, or translate envelopes — it only:
-//   - terminates the WebSocket and authenticates the session cookie,
-//   - spawns one `codex app-server --transport stdio` subprocess per session
-//     (or the bundled mock-codex.mjs that speaks the same protocol subset
-//     when no real binary or API key is available),
-//   - injects credentials into the child's environment / `loginApiKey` call,
-//   - pipes raw JSON-RPC frames back and forth.
+// Per WebSocket the gateway:
+//   1. authenticates the cookie session,
+//   2. spawns one `codex app-server` (or the bundled mock) bound to that
+//      session's auth + workdir,
+//   3. on spawn, if an API key is set, sends a single canonical
+//      `loginApiKey` JSON-RPC request to the child (still inside the
+//      protocol; no custom envelope),
+//   4. then pipes raw JSON-RPC frames between the WS and the child stdio
+//      until either side closes.
 //
-// Backend selection (per WebSocket connection):
-//   - real:  $CODEX_BIN exists AND the session has either an API key set or
-//            ChatGPT auth tokens cached. Spawns `$CODEX_BIN app-server`.
-//   - mock:  otherwise. Spawns the bundled mock app-server in JS, which
-//            implements the same JSON-RPC method names so the UI can be
-//            exercised end-to-end (including the approval flow) without
-//            OpenAI keys.
+// Backend selection:
+//   - real:  $CODEX_BIN exists. Spawns `$CODEX_BIN app-server`. The browser
+//            then drives auth via canonical methods (`loginApiKey`,
+//            `account/login/start`).
+//   - mock:  $CODEX_BIN is unset or missing. Spawns the bundled JS mock
+//            which speaks the same JSON-RPC subset for development.
 //
-// Credentials never leave the server: the API key and any OAuth tokens are
-// stored in an in-memory session map keyed by an http-only session cookie.
+// Credentials never leave the server: API key + OAuth token are held in an
+// in-memory session map keyed by an http-only, secure session cookie.
 
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -45,11 +46,16 @@ const PUBLIC_DIR = join(__dirname, "public");
 const WORKDIR_ROOT = resolve(process.env.CODEX_WEB_WORKDIR_ROOT ?? join(__dirname, ".workdirs"));
 const CODEX_BIN = process.env.CODEX_BIN ?? "";
 const MOCK_BIN = join(__dirname, "mock-codex.mjs");
+const IS_PROD = process.env.NODE_ENV === "production";
 
 mkdirSync(WORKDIR_ROOT, { recursive: true });
 
 // -------- session store (in-memory) --------
-// session: { id, apiKey?, oauth?, createdAt, lastSeenAt, workdir }
+// session: {
+//   id, apiKey?, oauth?, createdAt, lastSeenAt, workdir,
+//   threads: Map<conversationId, { id, name, lastActive, lastTurnText? }>,
+//   activeConversationId?,
+// }
 const sessions = new Map();
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_MAX = 1000;
@@ -67,20 +73,37 @@ setInterval(() => {
 
 function touchSession(s) { if (s) s.lastSeenAt = Date.now(); }
 
+function makeSession(id) {
+  const workdir = join(WORKDIR_ROOT, id);
+  mkdirSync(workdir, { recursive: true });
+  return {
+    id, apiKey: undefined, oauth: undefined,
+    createdAt: Date.now(), lastSeenAt: Date.now(), workdir,
+    threads: new Map(),
+    activeConversationId: undefined,
+  };
+}
+
+function isSecureRequest(req) {
+  // Trust the standard reverse-proxy header used by Replit and most
+  // production fronts. Falls back to the encrypted-socket flag.
+  const fwd = req.headers["x-forwarded-proto"];
+  if (typeof fwd === "string" && fwd.split(",")[0].trim() === "https") return true;
+  return Boolean(req.socket && req.socket.encrypted);
+}
+
 function getOrCreateSession(req, res) {
   let id = req.cookies?.codexsid;
   if (id && sessions.has(id)) { touchSession(sessions.get(id)); return sessions.get(id); }
   id = randomUUID();
-  const workdir = join(WORKDIR_ROOT, id);
-  mkdirSync(workdir, { recursive: true });
-  const session = {
-    id, apiKey: undefined, oauth: undefined,
-    createdAt: Date.now(), lastSeenAt: Date.now(), workdir,
-  };
+  const session = makeSession(id);
   sessions.set(id, session);
   res.cookie("codexsid", id, {
-    httpOnly: true, sameSite: "lax", secure: false,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: isSecureRequest(req) || IS_PROD,
     maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: "/",
   });
   return session;
 }
@@ -104,17 +127,17 @@ function sameOriginOnly(req, res, next) {
   res.status(403).json({ error: "cross-origin request rejected" });
 }
 
-function backendKindFor(s) {
-  if (CODEX_BIN && existsSync(CODEX_BIN) && (s.apiKey || s.oauth)) return "real";
-  return "mock";
+function backendKindFor() {
+  return CODEX_BIN && existsSync(CODEX_BIN) ? "real" : "mock";
 }
 
 // -------- HTTP --------
 const app = express();
+app.set("trust proxy", true);
 app.use(cookieParser());
 app.use(express.json({ limit: "1mb" }));
 app.use((_req, res, next) => {
-  if (process.env.NODE_ENV !== "production") res.setHeader("Cache-Control", "no-store");
+  if (!IS_PROD) res.setHeader("Cache-Control", "no-store");
   next();
 });
 app.use(express.static(PUBLIC_DIR));
@@ -124,9 +147,10 @@ app.get("/api/whoami", (req, res) => {
   res.json({
     sessionId: s.id,
     hasApiKey: Boolean(s.apiKey),
-    hasOauth: Boolean(s.oauth),
-    authMethod: s.oauth ? "chatgpt" : (s.apiKey ? "apikey" : null),
-    backend: backendKindFor(s),
+    hasOauth: Boolean(s.oauth?.token),
+    account: s.oauth?.account ?? null,
+    authMethod: s.oauth?.token ? "chatgpt" : (s.apiKey ? "apikey" : null),
+    backend: backendKindFor(),
     realBinaryConfigured: Boolean(CODEX_BIN && existsSync(CODEX_BIN)),
     workdir: s.workdir,
   });
@@ -140,7 +164,7 @@ app.post("/api/login", sameOriginOnly, (req, res) => {
   }
   s.apiKey = apiKey.trim();
   s.oauth = undefined;
-  res.json({ ok: true, backend: backendKindFor(s) });
+  res.json({ ok: true, backend: backendKindFor() });
 });
 
 app.post("/api/logout", sameOriginOnly, (req, res) => {
@@ -149,38 +173,19 @@ app.post("/api/logout", sameOriginOnly, (req, res) => {
   res.json({ ok: true });
 });
 
-// ChatGPT OAuth/device-code flow: kicks off `account/login/start` via the
-// dedicated WS channel and returns the verification URL + user code. The
-// gateway holds the resulting access token in the session.
-app.post("/api/oauth/chatgpt/start", sameOriginOnly, async (req, res) => {
+// ChatGPT OAuth/device-code seed. The browser then drives the canonical
+// `account/login/start` JSON-RPC request over the WebSocket. The token is
+// persisted in the session by the gateway when the child returns it.
+app.post("/api/oauth/chatgpt/start", sameOriginOnly, (req, res) => {
   const s = getOrCreateSession(req, res);
-  if (!CODEX_BIN || !existsSync(CODEX_BIN)) {
-    // Mock backend simulates the device-code flow so the UI is exercisable.
-    s.oauth = { pending: true, deviceCode: "MOCK-DEMO-CODE", verificationUri: "https://chat.openai.com/auth/device" };
-    res.json({
-      verificationUri: s.oauth.verificationUri,
-      userCode: s.oauth.deviceCode,
-      mock: true,
-      message: "Demo flow — the mock backend will auto-complete sign-in in 3s.",
-    });
-    setTimeout(() => { s.oauth = { account: "demo@chatgpt", token: "mock-chatgpt-token" }; }, 3000);
-    return;
-  }
-  // For the real backend, mark the session as having an OAuth attempt in
-  // flight so the gateway will (re)spawn the real `codex app-server` for
-  // the next WebSocket. The browser then drives `account/login/start` over
-  // its existing JSON-RPC WebSocket; on success the child emits
-  // `account/updated`, which the gateway intercepts to persist the token.
   s.oauth = { ...(s.oauth ?? {}), pending: true };
-  res.json({ useJsonRpc: true, reconnect: true });
+  res.json({ useJsonRpc: true });
 });
 
 app.get("/api/threads", (req, res) => {
-  // Real implementation will be served by the JSON-RPC `thread/list` method
-  // through the WebSocket; this HTTP endpoint exists only so the sidebar can
-  // render an empty list before the WS hands over.
-  getOrCreateSession(req, res);
-  res.json({ threads: [] });
+  const s = getOrCreateSession(req, res);
+  const threads = [...s.threads.values()].sort((a, b) => b.lastActive - a.lastActive);
+  res.json({ threads });
 });
 
 app.post("/api/file-search", sameOriginOnly, async (req, res) => {
@@ -226,8 +231,9 @@ server.on("upgrade", (req) => {
 wss.on("connection", (ws, req) => {
   const session = getSessionFromCookie(req.headers.cookie);
   if (!session) {
-    ws.send(JSON.stringify({ jsonrpc: "2.0", method: "gateway/error", params: { message: "no session; reload the page" } }));
-    ws.close(); return;
+    // No protocol payload — close with a clear code so the client reconnects.
+    ws.close(4401, "no session");
+    return;
   }
   new BridgeConnection(ws, session);
 });
@@ -236,26 +242,19 @@ class BridgeConnection {
   constructor(ws, session) {
     this.ws = ws;
     this.session = session;
-    this.kind = backendKindFor(session);
+    this.kind = backendKindFor();
     this.child = null;
     this.buf = "";
     this.spawn();
     ws.on("message", (raw) => this.onWsMessage(raw));
     ws.on("close", () => this.killChild());
     ws.on("error", () => this.killChild());
-
-    // Out-of-band: tell the UI which backend it's talking to. This is the
-    // ONLY non-JSON-RPC frame the gateway emits, and it's clearly namespaced.
-    this.sendWs({ jsonrpc: "2.0", method: "gateway/ready", params: {
-      backend: this.kind,
-      workdir: session.workdir,
-      authMethod: session.oauth ? "chatgpt" : (session.apiKey ? "apikey" : null),
-    }});
   }
 
   spawn() {
     const env = { ...process.env, CODEX_HOME: join(this.session.workdir, ".codex") };
     if (this.session.apiKey) env.OPENAI_API_KEY = this.session.apiKey;
+    if (this.session.oauth?.token) env.CODEX_AUTH_TOKEN = this.session.oauth.token;
 
     let bin, args;
     if (this.kind === "real") {
@@ -265,27 +264,39 @@ class BridgeConnection {
       bin = process.execPath;
       args = [MOCK_BIN];
       env.MOCK_WORKDIR = this.session.workdir;
-      env.MOCK_HAS_AUTH = (this.session.apiKey || this.session.oauth) ? "1" : "0";
+      env.MOCK_HAS_AUTH = (this.session.apiKey || this.session.oauth?.token) ? "1" : "0";
     }
     try {
       this.child = spawn(bin, args, { env, cwd: this.session.workdir, stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
-      this.sendWs({ jsonrpc: "2.0", method: "gateway/error", params: { message: `failed to spawn backend: ${err.message}` } });
+      console.error("[codex-web] failed to spawn backend:", err.message);
+      // Close the WS with a non-1000 code; the client reconnects.
+      try { this.ws.close(4500, `spawn failed: ${err.message}`); } catch {}
       return;
     }
 
     this.child.stdout.on("data", (chunk) => this.onChildData(chunk));
     this.child.stderr.on("data", (chunk) => {
-      // Surface backend stderr as a gateway log notification (debug aid).
-      this.sendWs({ jsonrpc: "2.0", method: "gateway/log", params: { stream: "stderr", line: chunk.toString("utf8") } });
+      // Surface backend stderr only to the gateway's own log.
+      process.stderr.write(`[codex backend ${this.session.id.slice(0,8)}] ${chunk}`);
     });
     this.child.on("exit", (code, signal) => {
-      this.sendWs({ jsonrpc: "2.0", method: "gateway/exit", params: { code, signal } });
       this.child = null;
+      try { this.ws.close(4502, `backend exited code=${code ?? "?"} signal=${signal ?? "?"}`); } catch {}
     });
     this.child.on("error", (err) => {
-      this.sendWs({ jsonrpc: "2.0", method: "gateway/error", params: { message: err.message } });
+      console.error("[codex-web] child error:", err.message);
+      try { this.ws.close(4500, `child error: ${err.message}`); } catch {}
     });
+
+    // Pre-seed auth via canonical JSON-RPC. Still strictly app-server-protocol.
+    if (this.session.apiKey) {
+      this.writeChild({
+        jsonrpc: "2.0", id: `gw-${randomUUID()}`,
+        method: "loginApiKey",
+        params: { apiKey: this.session.apiKey },
+      });
+    }
   }
 
   onChildData(chunk) {
@@ -295,31 +306,37 @@ class BridgeConnection {
       const line = this.buf.slice(0, nl).trim();
       this.buf = this.buf.slice(nl + 1);
       if (!line) continue;
-      // Validate it's JSON-RPC; if not, surface as a log line and continue
-      // (real codex app-server occasionally writes startup logs to stdout).
-      try {
-        const parsed = JSON.parse(line);
-        if (parsed && (parsed.jsonrpc === "2.0" || parsed.jsonrpc === undefined)) {
-          // Tag method notifications coming from the server side so the
-          // browser knows whether something is a request, response, or
-          // notification per the JSON-RPC 2.0 spec.
-          this.ws.send(line);
-          this.maybePersistAuth(parsed);
-          continue;
-        }
-      } catch {}
-      this.sendWs({ jsonrpc: "2.0", method: "gateway/log", params: { stream: "stdout", line } });
+      let parsed;
+      try { parsed = JSON.parse(line); } catch {
+        // Non-JSON output from the child is a backend log — keep it server-side.
+        process.stderr.write(`[codex backend ${this.session.id.slice(0,8)} stdout] ${line}\n`);
+        continue;
+      }
+      if (!parsed || (parsed.jsonrpc !== "2.0" && parsed.jsonrpc !== undefined)) continue;
+      // Forward verbatim — no rewriting.
+      try { if (this.ws.readyState === this.ws.OPEN) this.ws.send(line); } catch {}
+      this.observeForSession(parsed);
     }
   }
 
-  // Watch for `account/login/start` responses so the gateway can persist
-  // any returned tokens into the session map (so they survive WS reconnects).
-  maybePersistAuth(msg) {
-    if (msg && msg.result && typeof msg.result === "object") {
-      if (typeof msg.result.authToken === "string") this.session.oauth = { ...(this.session.oauth ?? {}), token: msg.result.authToken };
-      if (typeof msg.result.account === "object" && msg.result.account?.email) {
-        this.session.oauth = { ...(this.session.oauth ?? {}), account: msg.result.account.email };
-      }
+  // Server-side observers that update session bookkeeping (thread list,
+  // OAuth token cache). They do NOT modify or replace the forwarded frame.
+  observeForSession(msg) {
+    if (msg.method === "thread/started" && msg.params?.conversationId) {
+      const id = msg.params.conversationId;
+      const existing = this.session.threads.get(id) ?? { id, name: id, lastActive: Date.now() };
+      existing.lastActive = Date.now();
+      this.session.threads.set(id, existing);
+      this.session.activeConversationId = id;
+    }
+    if (msg.method === "account/updated" && msg.params?.account) {
+      const acc = msg.params.account;
+      this.session.oauth = {
+        ...(this.session.oauth ?? {}),
+        account: typeof acc === "string" ? acc : (acc.email ?? acc.id ?? "chatgpt"),
+        token: msg.params.authToken ?? this.session.oauth?.token ?? "oauth-set",
+        pending: false,
+      };
     }
   }
 
@@ -327,29 +344,25 @@ class BridgeConnection {
     if (!this.child || !this.child.stdin || this.child.stdin.destroyed) return;
     let s;
     try { s = raw.toString("utf8"); } catch { return; }
-    // Gateway-internal control frames the browser may send (e.g.
-    // refresh credentials after API-key login on a reconnect).
-    try {
-      const msg = JSON.parse(s);
-      if (msg && msg.method === "gateway/refreshAuth") {
-        if (this.session.apiKey && this.child) {
-          try {
-            this.child.stdin.write(JSON.stringify({
-              jsonrpc: "2.0", id: `gw-${Date.now()}`,
-              method: "loginApiKey",
-              params: { apiKey: this.session.apiKey },
-            }) + "\n");
-          } catch {}
-        }
-        return;
+    // Validate it's a JSON-RPC frame. Drop anything else — strict protocol.
+    let parsed;
+    try { parsed = JSON.parse(s); } catch { return; }
+    if (!parsed || parsed.jsonrpc !== "2.0") return;
+    // Track outgoing turn intent so we can name the thread on first user turn.
+    if (parsed.method === "turn/start" && this.session.activeConversationId) {
+      const t = this.session.threads.get(this.session.activeConversationId);
+      if (t) {
+        const text = (parsed.params?.input ?? []).map((p) => p?.text ?? "").join(" ").trim();
+        if (text && (!t.name || t.name === t.id)) t.name = text.slice(0, 48);
+        t.lastActive = Date.now();
       }
-    } catch {}
+    }
     try { this.child.stdin.write(s + "\n"); } catch {}
   }
 
-  sendWs(obj) {
-    if (this.ws.readyState !== this.ws.OPEN) return;
-    this.ws.send(JSON.stringify(obj));
+  writeChild(obj) {
+    if (!this.child || !this.child.stdin || this.child.stdin.destroyed) return;
+    try { this.child.stdin.write(JSON.stringify(obj) + "\n"); } catch {}
   }
 
   killChild() {

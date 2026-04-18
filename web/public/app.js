@@ -44,6 +44,8 @@ const state = {
     { name: "/login", desc: "Sign in with an OpenAI API key" },
     { name: "/logout", desc: "Sign out and clear the API key" },
     { name: "/clear", desc: "Clear the current transcript" },
+    { name: "/reset", desc: "Reset the current conversation context" },
+    { name: "/compact", desc: "Compact the conversation history" },
     { name: "/mcp", desc: "Manage MCP servers" },
     { name: "/help", desc: "Show available commands" },
   ],
@@ -115,17 +117,25 @@ function renderThreads() {
   }
 }
 
-function openThread(id) {
+async function openThread(id) {
   state.activeThreadId = id;
   $("#thread-title").textContent = id;
   $("#transcript").innerHTML = "";
   state.itemsById.clear();
   state.itemOrder = [];
   renderThreads();
-  appendSystem(`Resumed thread ${id}. Send a message to continue.`);
+  try {
+    await rpcCall("thread/resume", { conversationId: id });
+    appendSystem(`Resumed thread ${id}.`);
+  } catch (e) {
+    appendSystem(`Could not resume ${id}: ${e.message}`, "error");
+  }
 }
 
 function newThread() {
+  if (state.activeThreadId) {
+    rpcCall("thread/interrupt", { conversationId: state.activeThreadId }).catch(() => {});
+  }
   state.activeThreadId = null;
   $("#thread-title").textContent = "New conversation";
   $("#transcript").innerHTML = "";
@@ -139,17 +149,48 @@ function connectWs() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   state.ws = ws;
-  ws.addEventListener("open", () => { state.reconnectAttempts = 0; });
+  ws.addEventListener("open", async () => {
+    state.reconnectAttempts = 0;
+    // First frame on every WS connection is the canonical
+    // app-server-protocol `initialize` request. No gateway preamble.
+    await initializeRpcSession();
+    // If we had an active thread when the socket dropped, transparently
+    // resume it via the canonical `thread/resume` request.
+    if (state.activeThreadId) {
+      try { await rpcCall("thread/resume", { conversationId: state.activeThreadId }); }
+      catch (e) { console.warn("thread/resume failed", e.message); }
+    }
+    // Push current client settings to the backend via canonical
+    // `config/value/write` so they are applied for subsequent turns.
+    pushSettingsToBackend().catch(() => {});
+    window.dispatchEvent(new CustomEvent("codex:ready"));
+  });
   ws.addEventListener("message", (e) => {
     try { onJsonRpc(JSON.parse(e.data)); }
     catch (err) { console.error("bad rpc frame", err, e.data); }
   });
-  ws.addEventListener("close", () => {
+  ws.addEventListener("close", (ev) => {
     state.ws = null; state.initialized = false; setInFlight(false);
-    appendSystem("Disconnected. Reconnecting…");
+    if (ev.code === 4401) { appendSystem("Session expired. Reload the page.", "error"); return; }
+    appendSystem(`Disconnected${ev.reason ? ` (${ev.reason})` : ""}. Reconnecting…`);
     setTimeout(connectWs, Math.min(5000, 500 * 2 ** state.reconnectAttempts++));
   });
   ws.addEventListener("error", () => ws.close());
+}
+
+async function pushSettingsToBackend() {
+  if (!state.initialized) return;
+  const s = state.settings;
+  const writes = [
+    ["model", s.model],
+    ["model_reasoning_effort", s.modelReasoningEffort],
+    ["approval_policy", s.approvalPolicy],
+    ["sandbox_mode", s.sandboxMode],
+    ["tools.web_search", s.webSearchMode !== "disabled"],
+  ];
+  await Promise.all(writes.map(([key, value]) =>
+    rpcCall("config/value/write", { path: key.split("."), value }).catch(() => {})
+  ));
 }
 
 function rpcRaw(obj) {
@@ -245,26 +286,10 @@ function mapDecision(uiDecision) {
 // by handleEvent / upsertItem / renderItem so the rendering layer stays put.
 function onNotification(method, params) {
   switch (method) {
-    case "gateway/ready":
-      state.whoami = { ...(state.whoami ?? {}), backend: params.backend, workdir: params.workdir, authMethod: params.authMethod };
-      updateStatusBar();
-      // Send `initialize` once per WS connection to begin a JSON-RPC session.
-      if (!state.initialized) initializeRpcSession();
-      window.dispatchEvent(new CustomEvent("codex:ready"));
-      return;
-    case "gateway/log":
-      console.log("[backend]", params.stream, params.line);
-      return;
-    case "gateway/exit":
-      appendSystem(`Backend exited (code=${params.code ?? "?"})`, "error");
-      return;
-    case "gateway/error":
-      appendSystem(`✗ ${params.message}`, "error");
-      return;
-
     case "thread/started":
       state.activeThreadId = params.conversationId;
       $("#thread-title").textContent = params.conversationId;
+      refreshThreads();
       return;
     case "turn/started":
       // already in_flight
@@ -790,6 +815,23 @@ function handleSlash(text) {
     case "/resume":
       appendSystem("Pick a thread from the sidebar to resume.");
       return;
+    case "/reset":
+      // Canonical reset: end the current thread and start a fresh one on
+      // the next user turn. Mirrors codex-tui's /reset.
+      if (state.activeThreadId) {
+        rpcCall("thread/interrupt", { conversationId: state.activeThreadId }).catch(() => {});
+      }
+      newThread();
+      appendSystem("Conversation reset.");
+      return;
+    case "/compact":
+      // Canonical compaction: ask the backend to summarize and prune
+      // conversation history. Mirrors codex-tui's /compact.
+      if (!state.activeThreadId) { appendSystem("No active thread to compact.", "error"); return; }
+      rpcCall("thread/compact", { conversationId: state.activeThreadId })
+        .then(() => appendSystem("History compacted."))
+        .catch((e) => appendSystem(`compact failed: ${e.message}`, "error"));
+      return;
     default:
       appendSystem(`unknown command: ${cmd}`, "error");
   }
@@ -850,23 +892,14 @@ function openLogin() {
       const status = m.querySelector("#oauth-status");
       status.textContent = "Starting ChatGPT sign-in…";
       try {
-        // Ask the gateway to seed the OAuth session, then drive the
-        // canonical app-server-protocol method `account/login/start`.
-        const seed = await fetch("/api/oauth/chatgpt/start", { method: "POST" }).then((r) => r.json());
-        // If the gateway needs to (re)spawn the real app-server for the
-        // OAuth-pending session, reconnect the WS first so subsequent
-        // JSON-RPC calls land on the real child.
-        if (seed?.reconnect && state.ws) {
-          await new Promise((resolve) => {
-            const ws = state.ws;
-            ws.addEventListener("close", () => resolve(), { once: true });
-            ws.close();
-          });
-          await waitForReady();
-        }
+        // Seed gateway-side OAuth bookkeeping, then drive the canonical
+        // `account/login/start` JSON-RPC request. The gateway forwards it
+        // verbatim and intercepts the `account/updated` notification to
+        // persist the resulting token in the session.
+        await fetch("/api/oauth/chatgpt/start", { method: "POST" });
         const r = await rpcCall("account/login/start", { method: "chatgpt" });
-        const verificationUri = r?.verificationUri ?? seed.verificationUri;
-        const userCode = r?.userCode ?? seed.userCode;
+        const verificationUri = r?.verificationUri;
+        const userCode = r?.userCode;
         status.innerHTML = `Open <a href="${escapeHtml(verificationUri)}" target="_blank" rel="noopener">${escapeHtml(verificationUri)}</a> and enter code <code>${escapeHtml(userCode)}</code>.`;
         // The mock backend resolves the OAuth flow via an `account/updated`
         // notification; that handler closes the modal.
@@ -989,7 +1022,7 @@ function openSettings(focus) {
       if (f) f.focus();
     }
     m.querySelector("#cancel").addEventListener("click", closeModal);
-    m.querySelector("#save").addEventListener("click", () => {
+    m.querySelector("#save").addEventListener("click", async () => {
       for (const k of ["model","approvalPolicy","sandboxMode","modelReasoningEffort","webSearchMode"]) {
         const node = m.querySelector(`[name="${k}"]`);
         if (node) state.settings[k] = node.value;
@@ -997,6 +1030,9 @@ function openSettings(focus) {
       state.settings.networkAccessEnabled = m.querySelector(`[name="networkAccessEnabled"]`).checked;
       save("settings", state.settings);
       updateStatusBar();
+      // Push to the backend over the canonical config/value/write method so
+      // settings actually take effect on the next turn.
+      await pushSettingsToBackend();
       closeModal();
     });
   });
