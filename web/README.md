@@ -1,108 +1,118 @@
 # Codex Web
 
-A browser front-end for the Codex CLI with parity to `codex-tui`. The UI is a
-thin client over the **canonical Rust `app-server` JSON-RPC 2.0 protocol**
-defined in `codex-rs/app-server-protocol`.
+`web/` is a real-browser front-end for the Rust `codex app-server`. There is
+no mock backend path anymore: local development, Playwright smoke tests, and
+Replit deployment all require a real `codex` or `codex-app-server` binary.
 
-## Architecture
+## Quickstart
 
-```
-┌──────────────┐    HTTP /api/*            ┌────────────────────────┐
-│              │ ───────────────────────►  │                        │
-│  Browser     │                           │  web/server.mjs         │
-│  (app.js     │    WebSocket /ws          │  (Node gateway)        │
-│   speaks     │ ◄──────────────────────►  │                        │
-│   JSON-RPC)  │  raw JSON-RPC frames      │  spawns one child per   │
-│              │                           │  WebSocket:            │
-└──────────────┘                           │   $CODEX_BIN app-server │
-                                           │   (or mock-codex.mjs)  │
-                                           └────────────────────────┘
-```
-
-* `web/server.mjs` is a **transparent JSON-RPC pass-through**. It does not
-  rewrap or rename methods. It forwards every browser frame straight to the
-  child `codex app-server` process's stdin and pipes the child's stdout back
-  out to the WebSocket. The only HTTP endpoints it owns are session/auth
-  bookkeeping (`/api/whoami`, `/api/login`, `/api/logout`,
-  `/api/oauth/chatgpt/start`).
-* `web/public/app.js` is a JSON-RPC 2.0 client. It implements the request /
-  response / notification routing, including server-initiated requests for
-  approvals (`item/commandExecution/requestApproval`,
-  `item/fileChange/requestApproval`, `item/applyPatchApproval/...`).
-* `web/mock-codex.mjs` is a small Node process that speaks the same
-  app-server-protocol subset for development when the Rust binary is not
-  available. Set `CODEX_BIN=/path/to/codex` to use the real one.
-
-## Auth
-
-Two methods, both exercised by `tests/e2e.spec.mjs`:
-
-* **OpenAI API key** — `POST /api/login { apiKey }`. Stored only on the
-  server, keyed by an HTTP-only session cookie. Forwarded to the child
-  process as `OPENAI_API_KEY`.
-* **ChatGPT OAuth** — Browser calls `POST /api/oauth/chatgpt/start` to
-  seed the session, then issues the canonical `account/login/start`
-  JSON-RPC request. The child app-server completes the device-code flow
-  and emits `account/updated`, which the UI uses to flip into the
-  signed-in state.
-
-Sessions are isolated per cookie. Each WebSocket spawns its own child
-app-server with that user's auth env, so users never share auth or
-conversation state.
-
-## Approvals
-
-Approvals are real server-initiated JSON-RPC **requests**, not custom
-notifications. The child process sends e.g.
-
-```json
-{ "jsonrpc": "2.0", "id": 42, "method": "item/commandExecution/requestApproval",
-  "params": { "command": "ls -la", "cwd": "..." } }
-```
-
-The browser renders an approval card with **Approve once / Approve for
-session / Deny** and replies with the matching `id` and a result of
-`{ "decision": "approved" | "approved_for_session" | "denied" }`. The
-child's `approval_policy` (set via `config/value/write` or
-`~/.codex/config.toml`) is honored by app-server itself — the gateway
-does not bypass it.
-
-## MCP servers
-
-The `/mcp` slash command opens a panel that calls
-`mcpServerStatus/list`, `config/mcpServer/reload`, and
-`config/value/write` (under the `mcp_servers` key) — exactly the methods
-the TUI uses.
-
-## Running
+Local with the installed multitool binary:
 
 ```bash
 cd web
 npm install
-npm start     # serves on $PORT (default 5000)
+CODEX_BIN="$HOME/.local/bin/codex" npm start
 ```
 
-To use the real Rust app-server, build it once:
+Local with a standalone app-server build:
 
 ```bash
-cargo build -p codex-cli --release --bin codex
-CODEX_BIN=$(pwd)/target/release/codex npm start
+cd /Users/marmar/Desktop/codex
+./web/scripts/build-codex-bin.sh
+cd web
+CODEX_BIN="$HOME/codex-bin/codex-app-server" npm start
 ```
 
-## End-to-end test
+The app serves HTTP + WebSocket traffic on port `5000` by default.
 
-A Playwright spec in `tests/e2e.spec.mjs` covers:
+## Runtime model
 
-1. ChatGPT (mock device-code) sign-in via `account/login/start`.
-2. Triggering an exec approval and a patch approval, approving both.
-3. Verifying the streamed agent message arrives.
-4. Listing MCP servers via `mcpServerStatus/list`.
+- `web/server.mjs` is a transparent JSON-RPC proxy for app-server v2.
+- Each browser session gets its own workdir under `web/.workdirs/<sessionId>/`.
+- Each session owns one backend child process; reconnecting the browser does not
+  recycle the child unless the session logs out or idles out.
+- The gateway owns API keys, ChatGPT device-code state, refresh tokens, uploads,
+  and workdir file serving.
 
-Run it against a running gateway:
+## Auth
+
+Two auth modes are supported:
+
+- API key: `POST /api/login`
+- ChatGPT device code: `POST /api/oauth/chatgpt/start`
+
+For ChatGPT auth, the gateway starts the device-code flow, stores the refresh
+token in memory, and logs the backend in through
+`account/login/start { type: "chatgptAuthTokens", ... }`. When the backend later
+requests `account/chatgptAuthTokens/refresh`, the browser calls the gateway’s
+`POST /api/oauth/chatgpt/refresh` endpoint and replies with fresh external auth
+tokens.
+
+High-level flow:
+
+```text
+Browser -> /api/oauth/chatgpt/start -> Gateway
+Gateway -> auth.openai.com device-code endpoints
+User enters device code in browser
+Gateway exchanges code for tokens and stores refresh token
+Gateway -> app-server account/login/start(chatgptAuthTokens)
+Browser answers future account/chatgptAuthTokens/refresh requests via /api/oauth/chatgpt/refresh
+```
+
+## Attachments and files
+
+- Image uploads go through `POST /api/upload`
+- Images and other workdir-scoped files render through `GET /api/workdir-file?path=...`
+- The composer currently supports paste-image and file-picker uploads for local
+  image inputs
+
+## Non-goals in the web build
+
+These intentionally show a friendly “use the CLI” message instead of failing:
+
+- realtime voice
+- `/fast`
+- native editor handoff
+- terminal-title and statusline escape handling
+- full TTY UI programs inside the browser
+
+## Playwright
+
+Install Playwright once:
 
 ```bash
 cd web
 npm install --no-save @playwright/test
 npx playwright install chromium
-BASE_URL=http://localhost:5000 npx playwright test
+```
+
+Run the live unauthenticated smoke suite:
+
+```bash
+cd web
+CODEX_BIN="$HOME/.local/bin/codex" npm run test:e2e
+```
+
+Run auth-gated tests only when you intentionally want an authenticated browser
+session:
+
+```bash
+cd web
+CODEX_BIN="$HOME/.local/bin/codex" PLAYWRIGHT_AUTH=1 npm run test:e2e:auth
+```
+
+## Replit
+
+Build the standalone backend once on Replit:
+
+```bash
+cd /Users/marmar/Desktop/codex
+./web/scripts/build-codex-bin.sh
+```
+
+Then start the app with:
+
+```bash
+cd web
+CODEX_BIN="$HOME/codex-bin/codex-app-server" npm start
 ```

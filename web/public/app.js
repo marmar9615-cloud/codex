@@ -1,147 +1,336 @@
-// Codex Web — browser front-end.
-// Talks to the gateway over /ws using `app-server-protocol` JSON-RPC 2.0
-// (the same protocol the Rust `codex app-server` speaks). Every frame on
-// the wire is a JSON-RPC envelope. The gateway is a transparent proxy.
+import {
+  $,
+  $$,
+  state,
+  save,
+  getAutocompleteState,
+  setAutocompleteState,
+} from "./state.js";
+import { escapeHtml } from "./utils.js";
+import { createUploads, hydrateWorkdirMedia } from "./uploads.js";
+import { createRenderers } from "./renderers.js";
+import { createModals } from "./modals.js";
+import { createNotificationHandlers, isAuthErrorMessage } from "./notifications.js";
+import { createRpc } from "./rpc.js";
+import { createCommandHandler } from "./commands.js";
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+function scrollToBottom() {
+  const transcript = $("#transcript");
+  transcript.scrollTop = transcript.scrollHeight;
+}
 
-// ---------- session state ----------
-const state = {
-  ws: null,
-  reconnectAttempts: 0,
-  whoami: null,
-  threads: [],
-  activeThreadId: null,
-  activeTurnId: null,
-  inFlight: false,
-  initialized: false,
-  // pending JSON-RPC requests sent by the browser, awaiting server response
-  pending: new Map(), // requestId -> { resolve, reject, method }
-  nextReqId: 1,
-  // current turn's items keyed by id, in order
-  itemsById: new Map(),
-  itemOrder: [],
-  // settings
-  settings: load("settings", {
-    model: "gpt-5-codex",
-    sandboxMode: "workspace-write",
-    approvalPolicy: "on-request",
-    networkAccessEnabled: false,
-    modelReasoningEffort: "medium",
-    webSearchMode: "disabled",
-  }),
-  // slash commands (mirrors codex-tui slash command set)
-  slashCommands: [
-    { name: "/new", desc: "Start a fresh conversation" },
-    { name: "/resume", desc: "Resume a previous thread (use sidebar)" },
-    { name: "/model", desc: "Choose the model for this session" },
-    { name: "/approvals", desc: "Change approval policy" },
-    { name: "/sandbox", desc: "Change sandbox policy" },
-    { name: "/reasoning", desc: "Set reasoning effort (low/medium/high)" },
-    { name: "/web-search", desc: "Toggle web search mode" },
-    { name: "/network", desc: "Toggle network access in sandbox" },
-    { name: "/status", desc: "Show current account, model, and policy" },
-    { name: "/login", desc: "Sign in with an OpenAI API key" },
-    { name: "/logout", desc: "Sign out and clear the API key" },
-    { name: "/clear", desc: "Clear the current transcript" },
-    { name: "/reset", desc: "Reset the current conversation context" },
-    { name: "/compact", desc: "Compact the conversation history" },
-    { name: "/mcp", desc: "Manage MCP servers" },
-    { name: "/help", desc: "Show available commands" },
-  ],
+function setInFlight(value) {
+  state.inFlight = value;
+  $("#cancel-btn").hidden = !value;
+  $("#send-btn").disabled = value;
+}
+
+function autoGrow(textarea) {
+  const update = () => {
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
+  };
+  textarea.addEventListener("input", update);
+  update();
+}
+
+function autoGrowReset(textarea) {
+  textarea.style.height = "auto";
+}
+
+function updateStatusBar() {
+  const whoami = state.whoami ?? {};
+  const backendPill = $("#backend-pill");
+  backendPill.textContent = `backend: ${whoami.backend ?? "?"}`;
+  backendPill.className = `pill ${whoami.backend === "real" ? "ok" : "warn"}`;
+  $("#model-pill").textContent = `model: ${state.settings.model || "…"}`;
+  $("#approval-pill").textContent = `approvals: ${state.settings.approvalPolicy}`;
+  $("#sandbox-pill").textContent = `sandbox: ${state.settings.sandboxMode}`;
+}
+
+const renderers = createRenderers({
+  openThread: (threadId) => void openThread(threadId),
+  onThreadAction: (action, thread) => handleThreadAction(action, thread),
+  onRollbackToItem: (itemId) => rollbackToItem(itemId),
+  openLogin: () => modals.openLogin(),
+  scrollToBottom,
+  hydrateWorkdirMedia,
+  afterUpsertItem: (item, isStart, isComplete) => trackAfterUpsertItem(item, isStart, isComplete),
+});
+
+const uploads = createUploads({
+  appendSystem: renderers.appendSystem,
+});
+
+let notificationHandlers = {
+  onNotification: () => {},
+  onServerRequest: () => {},
 };
 
-// Expose for end-to-end tests (transport-drop simulation, etc.).
-if (typeof window !== "undefined") window.state = state;
+const rpc = createRpc({
+  onNotification: (...args) => notificationHandlers.onNotification(...args),
+  onServerRequest: (...args) => notificationHandlers.onServerRequest(...args),
+  refreshWhoAmI,
+  refreshThreads,
+  refreshModels,
+  refreshAccount,
+  refreshRateLimits,
+  refreshConfigState,
+  refreshExperimentalFeatures,
+  pushSettingsToBackend,
+  appendSystem: renderers.appendSystem,
+  setInFlight,
+});
 
-function load(key, fallback) {
-  try { return { ...fallback, ...(JSON.parse(localStorage.getItem(key) ?? "{}")) }; }
-  catch { return fallback; }
-}
-function save(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
+const modals = createModals({
+  rpcCall: rpc.rpcCall,
+  rpcRaw: rpc.rpcRaw,
+  rpcReply: rpc.rpcReply,
+  refreshWhoAmI,
+  refreshAccount,
+  refreshConfigState,
+  refreshExperimentalFeatures,
+  pushSettingsToBackend,
+  updateStatusBar,
+  appendSystem: renderers.appendSystem,
+  clearAuthRequiredCard: renderers.clearAuthRequiredCard,
+});
 
-// ---------- bootstrap ----------
+notificationHandlers = createNotificationHandlers({
+  rpcReply: rpc.rpcReply,
+  rpcRaw: rpc.rpcRaw,
+  refreshWhoAmI,
+  refreshAccount,
+  renderAccount: renderers.renderAccount,
+  renderAccountPill: renderers.renderAccountPill,
+  renderApproval: renderers.renderApproval,
+  renderRatePill: renderers.renderRatePill,
+  renderThreads: renderers.renderThreads,
+  renderTokenPill: renderers.renderTokenPill,
+  upsertItem: renderers.upsertItem,
+  appendStreamDelta: renderers.appendStreamDelta,
+  appendMcpProgress: renderers.appendMcpProgress,
+  appendSystem: renderers.appendSystem,
+  clearAuthRequiredCard: renderers.clearAuthRequiredCard,
+  showAuthRequiredCard: renderers.showAuthRequiredCard,
+  setInFlight,
+  updateStatusBar,
+  openUserInputModal: modals.openUserInputModal,
+  openElicitationModal: modals.openElicitationModal,
+  openPermissionsModal: modals.openPermissionsModal,
+  onThreadStarted,
+  onTurnStarted,
+  onTurnFinished,
+  onStandaloneCommandDelta,
+});
+
+const handleSlash = createCommandHandler({
+  newThread,
+  clearTranscript: renderers.clearTranscript,
+  openSettings: modals.openSettings,
+  openLogin: modals.openLogin,
+  doLogout,
+  openMcpModal: modals.openMcpModal,
+  openJsonModal: modals.openJsonModal,
+  openListModal: modals.openListModal,
+  appendSystem: renderers.appendSystem,
+  updateStatusBar,
+  refreshConfigState,
+  rpcCall: rpc.rpcCall,
+  showCliOnlyBanner,
+  interruptTurn,
+  handleThreadAction,
+  rollbackTurns,
+});
+
 async function bootstrap() {
   await refreshWhoAmI();
   await refreshThreads();
-  connectWs();
+  rpc.connectWs();
   bindUi();
   updateStatusBar();
+  uploads.renderPendingUploads();
 }
 
 async function refreshWhoAmI() {
-  const r = await fetch("/api/whoami");
-  state.whoami = await r.json();
-  renderAccount();
+  const response = await fetch("/api/whoami");
+  state.whoami = await response.json();
+  renderers.renderAccount();
+  renderers.renderAccountPill();
+  updateStatusBar();
 }
+
 async function refreshThreads() {
-  const r = await fetch("/api/threads");
-  const data = await r.json();
-  state.threads = data.threads;
-  renderThreads();
-}
-
-function renderAccount() {
-  const w = state.whoami;
-  const status = $("#account-status");
-  const btn = $("#account-btn");
-  if (!w) { status.textContent = "—"; return; }
-  if (w.hasOauth) {
-    status.textContent = `ChatGPT: ${w.account?.email ?? w.account ?? "signed in"}`;
-    status.classList.remove("muted");
-    btn.textContent = "Sign out";
-  } else if (w.hasApiKey) {
-    status.textContent = "API key set";
-    status.classList.remove("muted");
-    btn.textContent = "Sign out";
-  } else {
-    status.textContent = w.realBinaryConfigured ? "not signed in" : "mock mode";
-    status.classList.add("muted");
-    btn.textContent = "Sign in";
-  }
-}
-
-function renderThreads() {
-  const nav = $("#threads");
-  nav.innerHTML = "";
-  if (state.threads.length === 0) {
-    nav.innerHTML = `<div class="muted" style="padding:10px;font-size:12px">No saved threads yet.</div>`;
-    return;
-  }
-  for (const t of state.threads) {
-    const el = document.createElement("div");
-    el.className = "thread-item" + (t.id === state.activeThreadId ? " active" : "");
-    const when = new Date(t.lastActive).toLocaleString();
-    el.innerHTML = `<div>${escapeHtml(t.name ?? t.id)}</div><div class="thread-time">${when}</div>`;
-    el.addEventListener("click", () => openThread(t.id));
-    nav.appendChild(el);
-  }
-}
-
-async function openThread(id) {
-  state.activeThreadId = id;
-  state.activeTurnId = null;
-  $("#thread-title").textContent = id;
-  $("#transcript").innerHTML = "";
-  state.itemsById.clear();
-  state.itemOrder = [];
-  renderThreads();
   try {
-    // Canonical v2 ThreadResumeParams: { threadId, persistExtendedHistory }.
-    await rpcCall("thread/resume", { threadId: id, persistExtendedHistory: false });
-    appendSystem(`Resumed thread ${id}.`);
-  } catch (e) {
-    appendSystem(`Could not resume ${id}: ${e.message}`, "error");
+    if (state.initialized) {
+      const response = await rpc.rpcCall("thread/list", { limit: 100 });
+      state.threads = (response?.data ?? []).map((thread) => ({
+        id: thread.id,
+        name: thread.name ?? thread.preview ?? thread.id,
+        preview: thread.preview ?? "",
+        lastActive: (thread.updatedAt ?? thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
+        status: thread.status ?? "active",
+        archived: thread.status === "archived",
+      }));
+    } else {
+      const response = await fetch("/api/threads");
+      const data = await response.json();
+      state.threads = data.threads ?? [];
+    }
+  } catch (error) {
+    console.warn("thread list failed", error.message);
+  }
+  renderers.renderThreads();
+}
+
+async function refreshModels() {
+  if (!state.initialized) return;
+  try {
+    const response = await rpc.rpcCall("model/list", { limit: 100, includeHidden: false });
+    const models = Array.isArray(response?.data)
+      ? response.data
+      : (Array.isArray(response?.models) ? response.models : []);
+    state.models = models;
+    if (!state.settings.model && models.length) {
+      const pick = models.find((model) => model.isDefault) ?? models[0];
+      const slug = pick?.id ?? pick?.model ?? pick?.slug ?? "";
+      if (slug) {
+        state.settings.model = slug;
+        save("settings", state.settings);
+      }
+    }
+    updateStatusBar();
+  } catch (error) {
+    console.warn("model/list failed", error.message);
+  }
+}
+
+async function refreshAccount() {
+  if (!state.initialized) return;
+  try {
+    const result = await rpc.rpcCall("account/read", { refreshToken: false });
+    const account = result?.account ?? null;
+    if (account?.type === "chatgpt") {
+      state.whoami = {
+        ...(state.whoami ?? {}),
+        hasOauth: true,
+        hasApiKey: false,
+        authMethod: "chatgptAuthTokens",
+        account: {
+          email: account.email ?? state.whoami?.account?.email ?? null,
+          planType: account.planType ?? state.whoami?.account?.planType ?? null,
+          chatgptAccountId: state.whoami?.account?.chatgptAccountId ?? null,
+        },
+      };
+      renderers.renderAccount();
+      renderers.renderAccountPill();
+    }
+  } catch (error) {
+    console.warn("account/read failed", error.message);
+  }
+}
+
+async function refreshRateLimits() {
+  if (!state.initialized) return;
+  try {
+    const result = await rpc.rpcCall("account/rateLimits/read", {});
+    renderers.renderRatePill(result?.rateLimits ?? null);
+  } catch (error) {
+    console.warn("account/rateLimits/read failed", error.message);
+  }
+}
+
+async function refreshConfigState() {
+  if (!state.initialized) return;
+  try {
+    state.configSnapshot = await rpc.rpcCall("config/read", {
+      includeLayers: true,
+      cwd: state.whoami?.workdir ?? null,
+    });
+    state.configRequirements = await rpc.rpcCall("configRequirements/read", {})
+      .catch(() => ({ requirements: null }));
+  } catch (error) {
+    console.warn("config/read failed", error.message);
+  }
+}
+
+async function refreshExperimentalFeatures() {
+  if (!state.initialized) return;
+  try {
+    const response = await rpc.rpcCall("experimentalFeature/list", { limit: 100 });
+    state.experimentalFeatures = response?.data ?? [];
+  } catch (error) {
+    console.warn("experimentalFeature/list failed", error.message);
+  }
+}
+
+async function pushSettingsToBackend() {
+  if (!state.initialized) return;
+  const settings = state.settings;
+  const edits = [
+    ...(settings.model ? [{ keyPath: "model", value: settings.model, mergeStrategy: "replace" }] : []),
+    { keyPath: "model_reasoning_effort", value: settings.modelReasoningEffort, mergeStrategy: "replace" },
+    { keyPath: "approval_policy", value: settings.approvalPolicy, mergeStrategy: "replace" },
+    { keyPath: "sandbox_mode", value: settings.sandboxMode, mergeStrategy: "replace" },
+    { keyPath: "tools.web_search", value: settings.webSearchMode !== "disabled", mergeStrategy: "replace" },
+  ];
+  await rpc.rpcCall("config/batchWrite", {
+    edits,
+    expectedVersion: state.configSnapshot?.layers?.[0]?.version ?? null,
+    reloadUserConfig: true,
+  }).catch(() => {});
+}
+
+function clearConversationState() {
+  state.activeTurnId = null;
+  state.currentTurnRecordId = null;
+  renderers.clearTranscript();
+}
+
+function hydrateThread(thread) {
+  clearConversationState();
+  if (!thread) return;
+  $("#thread-title").textContent = thread.name ?? thread.preview ?? thread.id;
+  state.activeThreadId = thread.id;
+  for (const turn of thread.turns ?? []) {
+    const turnIndex = state.turns.length;
+    const record = {
+      id: turn.id ?? `turn-${turnIndex}`,
+      status: turn.status ?? "completed",
+      items: [...(turn.items ?? [])],
+    };
+    state.turns.push(record);
+    for (const item of record.items) {
+      state.itemTurnIndex.set(item.id, turnIndex);
+      renderers.upsertItem(item, true, true);
+    }
+  }
+  renderers.renderThreads();
+}
+
+async function openThread(threadId) {
+  state.activeThreadId = threadId;
+  state.activeTurnId = null;
+  $("#thread-title").textContent = threadId;
+  clearConversationState();
+  renderers.renderThreads();
+  try {
+    try {
+      const response = await rpc.rpcCall("thread/read", { threadId, includeTurns: true });
+      if (response?.thread) hydrateThread(response.thread);
+    } catch (error) {
+      console.warn("thread/read failed, resuming without hydration", error.message);
+    }
+    await rpc.rpcCall("thread/resume", { threadId, persistExtendedHistory: true });
+    renderers.appendSystem(`Resumed thread ${threadId}.`);
+  } catch (error) {
+    renderers.appendSystem(`Could not resume ${threadId}: ${error.message}`, "error");
   }
 }
 
 function newThread() {
-  // Best-effort interrupt of an in-flight turn before discarding the thread.
   if (state.activeThreadId && state.activeTurnId) {
-    rpcCall("turn/interrupt", {
+    void rpc.rpcCall("turn/interrupt", {
       threadId: state.activeThreadId,
       turnId: state.activeTurnId,
     }).catch(() => {});
@@ -149,600 +338,348 @@ function newThread() {
   state.activeThreadId = null;
   state.activeTurnId = null;
   $("#thread-title").textContent = "New conversation";
-  $("#transcript").innerHTML = "";
-  state.itemsById.clear();
-  state.itemOrder = [];
-  renderThreads();
+  clearConversationState();
+  renderers.renderThreads();
 }
 
-// ---------- WebSocket / JSON-RPC client ----------
-function connectWs() {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/ws`);
-  state.ws = ws;
-  ws.addEventListener("open", async () => {
-    state.reconnectAttempts = 0;
-    // First frame on every WS connection is the canonical
-    // app-server-protocol `initialize` request. No gateway preamble.
-    await initializeRpcSession();
-    // If we had an active thread when the socket dropped, transparently
-    // resume it via the canonical `thread/resume` request.
-    if (state.activeThreadId) {
-      try {
-        await rpcCall("thread/resume", {
-          threadId: state.activeThreadId,
-          persistExtendedHistory: false,
-        });
-      } catch (e) { console.warn("thread/resume failed", e.message); }
-    }
-    // Push current client settings to the backend via canonical
-    // `config/value/write` so they are applied for subsequent turns.
-    pushSettingsToBackend().catch(() => {});
-    window.dispatchEvent(new CustomEvent("codex:ready"));
-  });
-  ws.addEventListener("message", (e) => {
-    try { onJsonRpc(JSON.parse(e.data)); }
-    catch (err) { console.error("bad rpc frame", err, e.data); }
-  });
-  ws.addEventListener("close", (ev) => {
-    state.ws = null; state.initialized = false; setInFlight(false);
-    if (ev.code === 4401) { appendSystem("Session expired. Reload the page.", "error"); return; }
-    appendSystem(`Disconnected${ev.reason ? ` (${ev.reason})` : ""}. Reconnecting…`);
-    setTimeout(connectWs, Math.min(5000, 500 * 2 ** state.reconnectAttempts++));
-  });
-  ws.addEventListener("error", () => ws.close());
+function onThreadStarted(thread) {
+  if (!thread?.id) return;
+  state.activeThreadId = thread.id;
+  $("#thread-title").textContent = thread.name ?? thread.preview ?? thread.id ?? "thread";
+  const existing = state.threads.find((entry) => entry.id === thread.id);
+  const snapshot = {
+    id: thread.id,
+    name: thread.name ?? thread.preview ?? thread.id,
+    preview: thread.preview ?? "",
+    lastActive: (thread.updatedAt ?? thread.createdAt ?? Math.floor(Date.now() / 1000)) * 1000,
+    status: thread.status ?? "active",
+    archived: thread.status === "archived",
+  };
+  if (existing) Object.assign(existing, snapshot);
+  else state.threads.unshift(snapshot);
 }
 
-async function pushSettingsToBackend() {
-  if (!state.initialized) return;
-  const s = state.settings;
-  // Canonical v2 ConfigValueWriteParams: { keyPath, value, mergeStrategy }.
-  // keyPath is a single dotted string per the schema.
-  const writes = [
-    ["model", s.model],
-    ["model_reasoning_effort", s.modelReasoningEffort],
-    ["approval_policy", s.approvalPolicy],
-    ["sandbox_mode", s.sandboxMode],
-    ["tools.web_search", s.webSearchMode !== "disabled"],
-  ];
-  await Promise.all(writes.map(([keyPath, value]) =>
-    rpcCall("config/value/write", { keyPath, value, mergeStrategy: "replace" })
-      .catch(() => {})
-  ));
-}
-
-function rpcRaw(obj) {
-  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify(obj));
-  }
-}
-
-function rpcNotify(method, params) {
-  rpcRaw({ jsonrpc: "2.0", method, params });
-}
-
-function rpcCall(method, params) {
-  return new Promise((resolve, reject) => {
-    const id = `c${state.nextReqId++}`;
-    state.pending.set(id, { resolve, reject, method });
-    rpcRaw({ jsonrpc: "2.0", id, method, params });
-    setTimeout(() => {
-      if (state.pending.has(id)) {
-        state.pending.delete(id);
-        reject(new Error(`rpc timeout: ${method}`));
-      }
-    }, 60_000);
-  });
-}
-
-// Reply to a server-initiated JSON-RPC request (e.g. an approval prompt).
-function rpcReply(id, result) {
-  rpcRaw({ jsonrpc: "2.0", id, result });
-}
-
-// Route an incoming JSON-RPC frame (notification, response, or
-// server-initiated request) into the existing UI event pipeline.
-function onJsonRpc(msg) {
-  if (!msg || typeof msg !== "object") return;
-
-  // Response to a browser-issued request
-  if (msg.id !== undefined && msg.method === undefined) {
-    const pending = state.pending.get(String(msg.id));
-    if (pending) {
-      state.pending.delete(String(msg.id));
-      if (msg.error) pending.reject(new Error(msg.error.message));
-      else pending.resolve(msg.result);
-    }
-    return;
-  }
-
-  // Server-initiated request expecting a reply (approvals, MCP elicitations)
-  if (msg.id !== undefined && msg.method !== undefined) {
-    onServerRequest(msg);
-    return;
-  }
-
-  // Notification
-  onNotification(msg.method, msg.params ?? {});
-}
-
-function onServerRequest(msg) {
-  switch (msg.method) {
-    case "item/commandExecution/requestApproval": {
-      const p = msg.params ?? {};
-      // v2 CommandExecutionRequestApprovalParams.command is a string.
-      const command = typeof p.command === "string"
-        ? p.command
-        : Array.isArray(p.command) ? p.command.join(" ") : "";
-      renderApproval({
-        request: { kind: "exec", command, cwd: p.cwd, reason: p.reason },
-        onDecision: (decision) => rpcReply(msg.id, { decision: mapDecision(decision) }),
-      });
-      return;
-    }
-    case "item/fileChange/requestApproval": {
-      const p = msg.params ?? {};
-      // v2 FileChangeRequestApprovalParams carries only metadata; the real
-      // file diff lives in the matching item/started notification.
-      const item = state.itemsById.get(p.itemId)?.item;
-      const files = (item?.changes ?? []).map((c) => ({
-        path: c.path, kind: patchKind(c.kind), diff: c.diff,
-      }));
-      renderApproval({
-        request: {
-          kind: "apply_patch",
-          summary: files.length ? `${files.length} file(s)` : (p.reason ?? "patch"),
-          files,
-        },
-        onDecision: (decision) => rpcReply(msg.id, { decision: mapDecision(decision) }),
-      });
-      return;
-    }
-    default:
-      // Unknown server request — reject so it doesn't deadlock.
-      rpcRaw({ jsonrpc: "2.0", id: msg.id,
-               error: { code: -32601, message: `unsupported server method: ${msg.method}` } });
-  }
-}
-
-// Map UI decisions to the canonical v2 approval decision enums.
-// CommandExecutionApprovalDecision: "accept" | "acceptForSession" | "decline" | "cancel" | …
-// FileChangeApprovalDecision:        "accept" | "acceptForSession" | "decline" | "cancel"
-function mapDecision(uiDecision) {
-  if (uiDecision === "approve") return "accept";
-  if (uiDecision === "approve-session") return "acceptForSession";
-  return "decline";
-}
-
-// Translate JSON-RPC notification methods into the existing event shape used
-// by handleEvent / upsertItem / renderItem so the rendering layer stays put.
-function onNotification(method, params) {
-  switch (method) {
-    case "thread/started":
-      // v2 ThreadStartedNotification: { thread: Thread }
-      state.activeThreadId = params.thread?.id ?? state.activeThreadId;
-      $("#thread-title").textContent = params.thread?.name ?? params.thread?.id ?? "thread";
-      refreshThreads();
-      return;
-    case "turn/started":
-      // v2 TurnStartedNotification: { threadId, turn }
-      state.activeTurnId = params.turn?.id ?? null;
-      return;
-    case "turn/completed": {
-      // v2 TurnCompletedNotification: { threadId, turn }
-      state.activeTurnId = null;
-      setInFlight(false);
-      const ms = params.turn?.durationMs;
-      appendSystem(`Turn complete${ms != null ? ` · ${ms} ms` : ""}`);
-      return;
-    }
-    case "turn/failed":
-      // Older notification kept for compatibility.
-      state.activeTurnId = null;
-      setInFlight(false);
-      appendSystem(`✗ ${params.error?.message ?? "turn failed"}`, "error");
-      return;
-
-    case "item/started":
-      // v2 ItemStartedNotification: { item, threadId, turnId }
-      upsertItem(params.item, true, false);
-      return;
-    case "item/agentMessage/delta": {
-      // v2 AgentMessageDeltaNotification: { threadId, turnId, itemId, delta }
-      const existing = state.itemsById.get(params.itemId);
-      const text = (existing?.item?.text ?? "") + (params.delta ?? "");
-      upsertItem(
-        { id: params.itemId, type: "agentMessage", text, phase: null, memoryCitation: null },
-        !existing, false,
-      );
-      return;
-    }
-    case "item/completed":
-      upsertItem(params.item, false, true);
-      return;
-    case "thread/compacted":
-      appendSystem("History compacted.");
-      return;
-
-    case "account/updated": {
-      // v2 AccountUpdatedNotification: { authMode, planType }
-      const authMode = params.authMode ?? null;
-      const planType = params.planType ?? null;
-      const hasOauth = authMode === "chatgpt" || authMode === "chatgptAuthTokens";
-      const hasApiKey = authMode === "apikey";
-      state.whoami = {
-        ...(state.whoami ?? {}),
-        authMethod: authMode,
-        account: hasOauth ? `chatgpt${planType ? ` (${planType})` : ""}` : null,
-        hasOauth, hasApiKey: state.whoami?.hasApiKey || hasApiKey,
-      };
-      renderAccount();
-      updateStatusBar();
-      if (hasOauth) {
-        appendSystem(`Signed in with ChatGPT${planType ? ` (${planType})` : ""}`);
-        window.dispatchEvent(new CustomEvent("codex:signedIn"));
-      } else if (hasApiKey) {
-        appendSystem("API key login confirmed by backend.");
-      } else if (authMode === null) {
-        appendSystem("Signed out by backend.");
-      }
-      return;
-    }
-    case "account/login/completed":
-      if (params?.success === false) {
-        appendSystem(`Login failed: ${params.error ?? "unknown error"}`, "error");
-      }
-      return;
-
-    case "mcpServer/startupStatus/updated":
-      if (typeof window.__mcpRefresh === "function") window.__mcpRefresh();
-      return;
-
-    default:
-      console.debug("unhandled notification", method, params);
-  }
-}
-
-async function initializeRpcSession() {
-  try {
-    await rpcCall("initialize", {
-      clientInfo: { name: "codex-web", title: "Codex Web", version: "0.1.0" },
-      capabilities: { experimentalApi: false },
+function onTurnStarted(turn) {
+  const turnId = turn?.id ?? state.activeTurnId;
+  if (!turnId) return;
+  state.currentTurnRecordId = turnId;
+  if (!state.turns.some((record) => record.id === turnId)) {
+    state.turns.push({
+      id: turnId,
+      status: turn?.status ?? "inProgress",
+      items: [],
     });
-    state.initialized = true;
-  } catch (e) {
-    console.error("initialize failed", e);
   }
 }
 
-// ---------- transcript item upsert ----------
-function upsertItem(item, isStart, isComplete = false) {
-  const transcript = $("#transcript");
-  let entry = state.itemsById.get(item.id);
-  if (!entry) {
-    entry = { item, el: renderItem(item, isComplete) };
-    state.itemsById.set(item.id, entry);
-    state.itemOrder.push(item.id);
-    transcript.appendChild(entry.el);
-  } else {
-    entry.item = item;
-    const replacement = renderItem(item, isComplete);
-    entry.el.replaceWith(replacement);
-    entry.el = replacement;
+function onTurnFinished(turn) {
+  const turnId = turn?.id ?? state.currentTurnRecordId;
+  if (!turnId) return;
+  const record = state.turns.find((entry) => entry.id === turnId);
+  if (record) record.status = turn?.status ?? record.status;
+  state.currentTurnRecordId = null;
+}
+
+function syncCommandSessionFromItem(item) {
+  if (item.type !== "commandExecution" || !item.processId) return;
+  if (item.status === "inProgress") {
+    state.commandSessions.set(item.processId, {
+      processId: item.processId,
+      source: "thread",
+      threadId: state.activeThreadId,
+      itemId: item.id,
+      command: item.command,
+      cwd: item.cwd,
+      status: item.status,
+      output: item.aggregatedOutput ?? "",
+    });
+    return;
   }
-  scrollToBottom();
+  state.commandSessions.delete(item.processId);
 }
 
-function renderItem(item, isComplete) {
-  // v2 ThreadItem `type` discriminator. See
-  // codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts.
-  switch (item.type) {
-    case "agentMessage": return renderAgentMessage(item);
-    case "reasoning": return renderReasoning(item);
-    case "commandExecution": return renderCommandExec(item);
-    case "fileChange": return renderFileChange(item);
-    case "mcpToolCall": return renderMcp(item);
-    case "plan": return renderPlan(item);
-    default: return renderUnknown(item);
+function trackAfterUpsertItem(item) {
+  if (state.activeTurnId) {
+    let turnIndex = state.turns.findIndex((record) => record.id === state.activeTurnId);
+    if (turnIndex === -1) {
+      state.turns.push({ id: state.activeTurnId, status: "inProgress", items: [] });
+      turnIndex = state.turns.length - 1;
+    }
+    const record = state.turns[turnIndex];
+    const itemIndex = record.items.findIndex((entry) => entry.id === item.id);
+    if (itemIndex >= 0) record.items[itemIndex] = item;
+    else record.items.push(item);
+    state.itemTurnIndex.set(item.id, turnIndex);
+  }
+  syncCommandSessionFromItem(item);
+}
+
+function decodeBase64Utf8(value) {
+  try {
+    return atob(value ?? "");
+  } catch {
+    return "";
   }
 }
 
-function renderAgentMessage(item) {
-  const cell = el("div", { class: "cell assistant" });
-  const bubble = el("div", { class: "bubble" });
-  bubble.innerHTML = renderMarkdownish(item.text ?? "");
-  cell.appendChild(bubble);
-  return cell;
+function onStandaloneCommandDelta(params) {
+  const processId = params.processId;
+  if (!processId) return;
+  const existing = state.commandSessions.get(processId) ?? {
+    processId,
+    source: "standalone",
+    status: "inProgress",
+    output: "",
+  };
+  const delta = decodeBase64Utf8(params.deltaBase64 ?? "");
+  existing.output = `${existing.output ?? ""}${delta}`;
+  existing.stream = params.stream ?? "stdout";
+  existing.capReached = params.capReached ?? false;
+  state.commandSessions.set(processId, existing);
 }
 
-function renderReasoning(item) {
-  const cell = el("div", { class: "cell assistant" });
-  const r = el("div", { class: "reasoning" });
-  r.textContent = item.text ?? "";
-  cell.appendChild(r);
-  return cell;
-}
-
-function renderCommandExec(item) {
-  // v2 commandExecution: { command, status: "inProgress"|"completed"|"failed"|"declined",
-  //                         aggregatedOutput, exitCode, durationMs, ... }
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  card.innerHTML = `
-    <div class="tc-head">
-      <span class="status-dot ${escapeHtml(item.status)}"></span>
-      <span class="badge">shell</span>
-      <span>${escapeHtml(item.status)}${item.exitCode != null ? ` · exit ${item.exitCode}` : ""}</span>
-    </div>
-    <div class="tc-cmd">$ ${escapeHtml(item.command ?? "")}</div>
-  `;
-  if (item.aggregatedOutput) {
-    const pre = el("pre");
-    pre.textContent = item.aggregatedOutput;
-    card.appendChild(pre);
+async function rollbackTurns(numTurns) {
+  if (!state.activeThreadId) return;
+  try {
+    const result = await rpc.rpcCall("thread/rollback", { threadId: state.activeThreadId, numTurns });
+    if (result?.thread) {
+      hydrateThread(result.thread);
+      renderers.appendSystem(`Rolled back ${numTurns} turn${numTurns === 1 ? "" : "s"}.`);
+    }
+  } catch (error) {
+    renderers.appendSystem(`rollback failed: ${error.message}`, "error");
   }
-  cell.appendChild(card);
-  return cell;
 }
 
-// v2 PatchChangeKind is a tagged union: { type: "add" | "delete" | "update", … }.
-// Older payloads may still carry a plain string; tolerate both for safety.
-function patchKind(k) {
-  if (!k) return "update";
-  if (typeof k === "string") return k;
-  return k.type ?? "update";
-}
-
-function renderFileChange(item) {
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  const counts = item.changes?.reduce((acc, c) => {
-    const kind = patchKind(c.kind);
-    acc[kind] = (acc[kind] ?? 0) + 1; return acc;
-  }, {}) ?? {};
-  const summary = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ");
-  card.innerHTML = `
-    <div class="tc-head">
-      <span class="status-dot ${escapeHtml(item.status)}"></span>
-      <span class="badge">apply_patch</span>
-      <span>${escapeHtml(item.status)}${summary ? ` · ${summary}` : ""}</span>
-    </div>
-  `;
-  for (const c of item.changes ?? []) {
-    const kind = patchKind(c.kind);
-    const file = el("div", { class: "diff-file" });
-    file.innerHTML = `
-      <header>
-        <span class="kind ${escapeHtml(kind)}">${escapeHtml(kind)}</span>
-        <span>${escapeHtml(c.path)}</span>
-      </header>
-      ${c.diff ? `<div class="diff-body">${renderDiff(c.diff)}</div>` : ""}
-    `;
-    card.appendChild(file);
+async function rollbackToItem(itemId) {
+  const turnIndex = state.itemTurnIndex.get(itemId);
+  if (turnIndex == null) {
+    renderers.appendSystem("Could not determine the turn for that rollback point.", "error");
+    return;
   }
-  cell.appendChild(card);
-  return cell;
-}
-
-function renderDiff(diff) {
-  return diff.split("\n").map((line) => {
-    const safe = escapeHtml(line);
-    if (line.startsWith("+") && !line.startsWith("+++")) return `<div class="add">${safe}</div>`;
-    if (line.startsWith("-") && !line.startsWith("---")) return `<div class="del">${safe}</div>`;
-    return `<div>${safe}</div>`;
-  }).join("");
-}
-
-function renderMcp(item) {
-  // v2 mcpToolCall: { server, tool, status, arguments, result, error, durationMs }
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  card.innerHTML = `
-    <div class="tc-head">
-      <span class="status-dot ${escapeHtml(item.status)}"></span>
-      <span class="badge">mcp</span>
-      <span>${escapeHtml(item.server ?? "")} · ${escapeHtml(item.tool ?? "")} · ${escapeHtml(item.status ?? "")}</span>
-    </div>
-    <details><summary>arguments</summary><pre>${escapeHtml(JSON.stringify(item.arguments, null, 2))}</pre></details>
-    ${item.result ? `<details><summary>result</summary><pre>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre></details>` : ""}
-    ${item.error ? `<div class="tc-meta" style="color:var(--danger)">${escapeHtml(item.error.message ?? JSON.stringify(item.error))}</div>` : ""}
-  `;
-  cell.appendChild(card);
-  return cell;
-}
-
-function renderPlan(item) {
-  // v2 plan item: { id, text }
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  card.innerHTML = `
-    <div class="tc-head">
-      <span class="status-dot completed"></span>
-      <span class="badge">plan</span>
-    </div>
-    <pre>${escapeHtml(item.text ?? "")}</pre>
-  `;
-  cell.appendChild(card);
-  return cell;
-}
-
-function renderUnknown(item) {
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  card.innerHTML = `
-    <div class="tc-head"><span class="badge">${escapeHtml(item.type)}</span></div>
-    <pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre>`;
-  cell.appendChild(card);
-  return cell;
-}
-
-// ---------- approval modal (inline in transcript) ----------
-// Driven by server-initiated JSON-RPC requests. `onDecision` is invoked with
-// "approve" | "approve-session" | "deny" and is responsible for replying.
-function renderApproval({ request: r, onDecision }) {
-  const transcript = $("#transcript");
-  const card = el("div", { class: "approval-card" });
-  const head = r.kind === "apply_patch" ? "Apply patch?" : r.kind === "exec" ? "Run command?" : "Approval requested";
-  let body;
-  if (r.kind === "exec") {
-    body = `<div class="tc-cmd">$ ${escapeHtml(r.command ?? "")}</div>
-            ${r.cwd ? `<div class="tc-meta">cwd: ${escapeHtml(r.cwd)}</div>` : ""}
-            ${r.reason ? `<div class="tc-meta">${escapeHtml(r.reason)}</div>` : ""}`;
-  } else if (r.kind === "apply_patch") {
-    body = `<div class="tc-meta">${escapeHtml(r.summary ?? "")}</div>
-            <ul class="todo-list">${(r.files ?? []).map((f) => `<li class="done">${escapeHtml(f.kind)} ${escapeHtml(f.path)}</li>`).join("")}</ul>`;
-  } else {
-    body = `<pre>${escapeHtml(JSON.stringify(r, null, 2))}</pre>`;
+  const numTurns = state.turns.length - turnIndex;
+  if (numTurns < 1) {
+    renderers.appendSystem("There are no later turns to roll back.", "error");
+    return;
   }
-  card.innerHTML = `
-    <div class="ap-head">⚠ ${head}</div>
-    <div class="ap-body">${body}</div>
-    <div class="ap-actions">
-      <button class="primary" data-decision="approve">Approve once</button>
-      <button data-decision="approve-session">Approve for session</button>
-      <button class="danger" data-decision="deny">Deny</button>
-    </div>`;
-  card.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-decision]");
-    if (!btn) return;
-    onDecision(btn.dataset.decision);
-    card.querySelectorAll("button").forEach((b) => (b.disabled = true));
-    card.querySelector(".ap-head").textContent = `→ ${btn.dataset.decision}`;
-  });
-  transcript.appendChild(card);
-  scrollToBottom();
+  await rollbackTurns(numTurns);
 }
 
-// ---------- composer & autocomplete ----------
-let acState = { kind: null, items: [], selected: 0, anchorStart: 0 };
+async function handleThreadAction(action, thread) {
+  const threadId = thread?.id ?? state.activeThreadId;
+  if (!threadId) return;
+  switch (action) {
+    case "fork": {
+      const result = await rpc.rpcCall("thread/fork", {
+        threadId,
+        persistExtendedHistory: true,
+      }).catch((error) => {
+        renderers.appendSystem(`fork failed: ${error.message}`, "error");
+        return null;
+      });
+      const nextThread = result?.thread ?? result;
+      if (nextThread?.id) await openThread(nextThread.id);
+      return;
+    }
+    case "rename": {
+      const proposed = thread?.promptDefault ?? thread?.name ?? "";
+      const name = prompt("New thread name:", proposed);
+      if (!name) return;
+      await rpc.rpcCall("thread/name/set", { threadId, name })
+        .then(async () => {
+          const active = state.threads.find((entry) => entry.id === threadId);
+          if (active) active.name = name;
+          if (state.activeThreadId === threadId) $("#thread-title").textContent = name;
+          await refreshThreads();
+        })
+        .catch((error) => renderers.appendSystem(`rename failed: ${error.message}`, "error"));
+      return;
+    }
+    case "archive":
+      await rpc.rpcCall("thread/archive", { threadId })
+        .then(refreshThreads)
+        .catch((error) => renderers.appendSystem(`archive failed: ${error.message}`, "error"));
+      return;
+    case "unarchive":
+      await rpc.rpcCall("thread/unarchive", { threadId })
+        .then(refreshThreads)
+        .catch((error) => renderers.appendSystem(`unarchive failed: ${error.message}`, "error"));
+      return;
+    case "copyId":
+      try {
+        await navigator.clipboard.writeText(threadId);
+        renderers.appendSystem(`Copied thread id ${threadId}.`);
+      } catch {
+        renderers.appendSystem(`Thread id: ${threadId}`);
+      }
+      return;
+    default:
+      return;
+  }
+}
 
 function bindUi() {
   $("#composer").addEventListener("submit", onSubmit);
-  $("#cancel-btn").addEventListener("click", interruptTurn);
+  $("#cancel-btn").addEventListener("click", () => void interruptTurn());
   $("#new-thread").addEventListener("click", newThread);
   $("#account-btn").addEventListener("click", onAccountClick);
-  $("#settings-btn").addEventListener("click", openSettings);
+  $("#settings-btn").addEventListener("click", () => modals.openSettings());
+  $("#attach-btn")?.addEventListener("click", () => $("#attach-input")?.click());
+  $("#attach-input")?.addEventListener("change", uploads.onAttachChange);
+  $("#thread-filter-active")?.addEventListener("click", () => {
+    state.filterArchived = false;
+    renderers.renderThreads();
+  });
+  $("#thread-filter-archived")?.addEventListener("click", () => {
+    state.filterArchived = true;
+    renderers.renderThreads();
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".thread-actions") && state.threadMenuOpenId) {
+      state.threadMenuOpenId = null;
+      renderers.renderThreads();
+    }
+  });
 
   const input = $("#input");
   input.addEventListener("input", onInput);
   input.addEventListener("keydown", onKeyDown);
+  input.addEventListener("paste", uploads.onComposerPaste);
   autoGrow(input);
 }
 
-function autoGrow(t) {
-  const update = () => {
-    t.style.height = "auto";
-    t.style.height = Math.min(t.scrollHeight, 200) + "px";
-  };
-  t.addEventListener("input", update); update();
-}
-
-async function onInput(e) {
-  const t = e.target;
-  const pos = t.selectionStart;
-  const upto = t.value.slice(0, pos);
-  // slash command at start of line
-  const slashMatch = /(^|\n)(\/[A-Za-z\-]*)$/.exec(upto);
+async function onInput(event) {
+  const input = event.target;
+  const position = input.selectionStart;
+  const textBeforeCursor = input.value.slice(0, position);
+  const slashMatch = /(^|\n)(\/[A-Za-z\-]*)$/.exec(textBeforeCursor);
   if (slashMatch) {
-    const q = slashMatch[2];
-    const items = state.slashCommands.filter((c) => c.name.startsWith(q));
-    showAutocomplete({ kind: "slash", items, anchorStart: pos - q.length });
+    const query = slashMatch[2];
+    const items = state.slashCommands.filter((command) => command.name.startsWith(query));
+    showAutocomplete({ kind: "slash", items, anchorStart: position - query.length });
     return;
   }
-  const atMatch = /(^|\s)@([A-Za-z0-9_\-./]*)$/.exec(upto);
-  if (atMatch) {
-    const q = atMatch[2];
+  const mentionMatch = /(^|\s)@([A-Za-z0-9_\-./]*)$/.exec(textBeforeCursor);
+  if (mentionMatch) {
+    const query = mentionMatch[2];
     try {
-      const r = await fetch("/api/file-search", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q }),
+      const response = await fetch("/api/file-search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
       });
-      const data = await r.json();
-      const items = (data.results ?? []).map((p) => ({ name: "@" + p, desc: "file" }));
-      showAutocomplete({ kind: "file", items, anchorStart: pos - q.length - 1 });
-    } catch { hideAutocomplete(); }
+      const data = await response.json();
+      const items = (data.results ?? []).map((path) => ({ name: `@${path}`, desc: "file" }));
+      showAutocomplete({ kind: "file", items, anchorStart: position - query.length - 1 });
+    } catch {
+      hideAutocomplete();
+    }
     return;
   }
   hideAutocomplete();
 }
 
 function showAutocomplete({ kind, items, anchorStart }) {
-  const ac = $("#autocomplete");
-  if (items.length === 0) { hideAutocomplete(); return; }
-  acState = { kind, items, selected: 0, anchorStart };
-  ac.innerHTML = items.map((it, i) =>
-    `<div class="ac-item ${i === 0 ? "selected" : ""}" data-idx="${i}">${escapeHtml(it.name)}<span class="ac-desc">${escapeHtml(it.desc ?? "")}</span></div>`
+  const autocomplete = $("#autocomplete");
+  if (items.length === 0) {
+    hideAutocomplete();
+    return;
+  }
+  setAutocompleteState({ kind, items, selected: 0, anchorStart });
+  autocomplete.innerHTML = items.map((item, index) =>
+    `<div class="ac-item ${index === 0 ? "selected" : ""}" data-idx="${index}">${escapeHtml(item.name)}<span class="ac-desc">${escapeHtml(item.desc ?? "")}</span></div>`,
   ).join("");
-  ac.hidden = false;
-  ac.querySelectorAll(".ac-item").forEach((node) => {
+  autocomplete.hidden = false;
+  autocomplete.querySelectorAll(".ac-item").forEach((node) => {
     node.addEventListener("click", () => {
-      acState.selected = Number(node.dataset.idx);
+      const current = getAutocompleteState();
+      setAutocompleteState({ ...current, selected: Number(node.dataset.idx) });
       acceptAutocomplete();
     });
   });
 }
 
 function hideAutocomplete() {
-  const ac = $("#autocomplete");
-  ac.hidden = true; ac.innerHTML = "";
-  acState = { kind: null, items: [], selected: 0, anchorStart: 0 };
+  const autocomplete = $("#autocomplete");
+  autocomplete.hidden = true;
+  autocomplete.innerHTML = "";
+  setAutocompleteState({ kind: null, items: [], selected: 0, anchorStart: 0 });
 }
 
 function acceptAutocomplete() {
-  const it = acState.items[acState.selected];
-  if (!it) return;
-  const t = $("#input");
-  const before = t.value.slice(0, acState.anchorStart);
-  const after = t.value.slice(t.selectionStart);
-  t.value = before + it.name + (it.name.startsWith("/") ? " " : " ") + after;
-  const newPos = (before + it.name + " ").length;
-  t.setSelectionRange(newPos, newPos);
+  const autocompleteState = getAutocompleteState();
+  const item = autocompleteState.items[autocompleteState.selected];
+  if (!item) return;
+  const input = $("#input");
+  const before = input.value.slice(0, autocompleteState.anchorStart);
+  const after = input.value.slice(input.selectionStart);
+  input.value = `${before}${item.name} ${after}`;
+  const newPosition = `${before}${item.name} `.length;
+  input.setSelectionRange(newPosition, newPosition);
   hideAutocomplete();
-  t.focus();
-}
-
-function onKeyDown(e) {
-  const ac = $("#autocomplete");
-  if (!ac.hidden) {
-    if (e.key === "ArrowDown") {
-      e.preventDefault(); moveSelection(1);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault(); moveSelection(-1);
-    } else if (e.key === "Enter" || e.key === "Tab") {
-      e.preventDefault(); acceptAutocomplete();
-    } else if (e.key === "Escape") {
-      e.preventDefault(); hideAutocomplete();
-    }
-    return;
-  }
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    $("#composer").requestSubmit();
-  } else if (e.key === "Escape" && state.inFlight) {
-    e.preventDefault();
-    interruptTurn();
-  }
+  input.focus();
 }
 
 function moveSelection(delta) {
   const items = $$("#autocomplete .ac-item");
-  acState.selected = (acState.selected + delta + items.length) % items.length;
-  items.forEach((n, i) => n.classList.toggle("selected", i === acState.selected));
+  if (!items.length) return;
+  const autocompleteState = getAutocompleteState();
+  const selected = (autocompleteState.selected + delta + items.length) % items.length;
+  setAutocompleteState({ ...autocompleteState, selected });
+  items.forEach((node, index) => {
+    node.classList.toggle("selected", index === selected);
+  });
 }
 
-function onSubmit(e) {
-  e.preventDefault();
-  const t = $("#input");
-  const text = t.value.trim();
-  if (!text) return;
-  if (text.startsWith("/")) {
-    handleSlash(text);
-    t.value = ""; autoGrowReset(t);
+function onKeyDown(event) {
+  const autocomplete = $("#autocomplete");
+  if (!autocomplete.hidden) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveSelection(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSelection(-1);
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      const autocompleteState = getAutocompleteState();
+      const selected = autocompleteState.items[autocompleteState.selected];
+      const inputValue = $("#input").value.trim();
+      if (autocompleteState.kind === "slash" && selected?.name === inputValue) {
+        hideAutocomplete();
+        $("#composer").requestSubmit();
+      } else {
+        acceptAutocomplete();
+      }
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      hideAutocomplete();
+    }
     return;
   }
-  appendUser(text);
-  startTurn(text);
-  t.value = ""; autoGrowReset(t);
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    $("#composer").requestSubmit();
+  } else if (event.key === "Escape" && state.inFlight) {
+    event.preventDefault();
+    void interruptTurn();
+  }
+}
+
+function onSubmit(event) {
+  event.preventDefault();
+  const input = $("#input");
+  const text = input.value.trim();
+  if (!text && state.pendingUploads.length === 0) return;
+  if (text.startsWith("/")) {
+    handleSlash(text);
+    input.value = "";
+    autoGrowReset(input);
+    return;
+  }
+  void startTurn(text);
+  input.value = "";
+  autoGrowReset(input);
 }
 
 async function startTurn(text) {
@@ -750,393 +687,64 @@ async function startTurn(text) {
   try {
     let threadId = state.activeThreadId;
     if (!threadId) {
-      // Canonical v2 ThreadStartParams: `sandbox` (not `sandboxMode`),
-      // `approvalPolicy`, `experimentalRawEvents`, `persistExtendedHistory`
-      // are required by the schema. The response is { thread: Thread, ... }.
-      const r = await rpcCall("thread/start", {
+      const response = await rpc.rpcCall("thread/start", {
         cwd: state.whoami?.workdir,
-        model: state.settings.model,
+        model: state.settings.model || null,
         sandbox: state.settings.sandboxMode,
         approvalPolicy: state.settings.approvalPolicy,
         experimentalRawEvents: false,
-        persistExtendedHistory: false,
+        persistExtendedHistory: true,
       });
-      threadId = r?.thread?.id ?? null;
+      threadId = response?.thread?.id ?? null;
       if (threadId) state.activeThreadId = threadId;
     }
-    // Canonical v2 TurnStartParams: { threadId, input: UserInput[] }.
-    // UserInput "text" requires `text_elements` per the schema.
-    await rpcCall("turn/start", {
+    const input = [];
+    if (text) input.push({ type: "text", text, text_elements: [] });
+    input.push(...state.pendingUploads.map((upload) => ({ type: "localImage", path: upload.path })));
+    await rpc.rpcCall("turn/start", {
       threadId,
-      input: [{ type: "text", text, text_elements: [] }],
+      input,
     });
-  } catch (e) {
+    state.pendingUploads = [];
+    uploads.renderPendingUploads();
+  } catch (error) {
     setInFlight(false);
-    appendSystem(`✗ ${e.message}`, "error");
+    if (isAuthErrorMessage(error.message)) {
+      renderers.showAuthRequiredCard(error.message);
+      return;
+    }
+    renderers.appendSystem(`✗ ${error.message}`, "error");
   }
 }
 
 async function interruptTurn() {
   if (!state.activeThreadId || !state.activeTurnId) return;
-  // Canonical v2 TurnInterruptParams: { threadId, turnId }.
   try {
-    await rpcCall("turn/interrupt", {
+    await rpc.rpcCall("turn/interrupt", {
       threadId: state.activeThreadId,
       turnId: state.activeTurnId,
     });
   } catch {}
 }
 
-function autoGrowReset(t) { t.style.height = "auto"; }
-
-function appendUser(text) {
-  const cell = el("div", { class: "cell user" });
-  const bubble = el("div", { class: "bubble" });
-  bubble.textContent = text;
-  cell.appendChild(bubble);
-  $("#transcript").appendChild(cell);
-  scrollToBottom();
-}
-
-function appendSystem(text, kind = "info") {
-  const cell = el("div", { class: "cell system" });
-  const bubble = el("div", { class: "bubble" });
-  bubble.textContent = text;
-  if (kind === "error") bubble.style.color = "var(--danger)";
-  cell.appendChild(bubble);
-  $("#transcript").appendChild(cell);
-  scrollToBottom();
-}
-
-function setInFlight(v) {
-  state.inFlight = v;
-  $("#cancel-btn").hidden = !v;
-  $("#send-btn").disabled = v;
-}
-
-function scrollToBottom() {
-  const t = $("#transcript");
-  t.scrollTop = t.scrollHeight;
-}
-
-// ---------- slash commands ----------
-function handleSlash(text) {
-  const [cmd, ...rest] = text.split(/\s+/);
-  const arg = rest.join(" ").trim();
-  switch (cmd) {
-    case "/new": newThread(); return;
-    case "/clear":
-      $("#transcript").innerHTML = "";
-      state.itemsById.clear(); state.itemOrder = [];
-      return;
-    case "/help":
-      appendSystem("Commands: " + state.slashCommands.map((c) => c.name).join(", "));
-      return;
-    case "/status": {
-      const w = state.whoami ?? {};
-      appendSystem(
-        `backend=${w.backend ?? "?"} · model=${state.settings.model} · ` +
-        `approvals=${state.settings.approvalPolicy} · sandbox=${state.settings.sandboxMode} · ` +
-        `network=${state.settings.networkAccessEnabled} · workdir=${w.workdir ?? "?"}`
-      );
-      return;
-    }
-    case "/login": openLogin(); return;
-    case "/logout": doLogout(); return;
-    case "/mcp": openMcpModal(); return;
-    case "/model":
-      if (arg) { state.settings.model = arg; save("settings", state.settings); updateStatusBar(); appendSystem(`model → ${arg}`); }
-      else openSettings("model");
-      return;
-    case "/approvals":
-      if (["never","on-request","on-failure","untrusted"].includes(arg)) {
-        state.settings.approvalPolicy = arg; save("settings", state.settings); updateStatusBar(); appendSystem(`approvals → ${arg}`);
-      } else openSettings("approvalPolicy");
-      return;
-    case "/sandbox":
-      if (["read-only","workspace-write","danger-full-access"].includes(arg)) {
-        state.settings.sandboxMode = arg; save("settings", state.settings); updateStatusBar(); appendSystem(`sandbox → ${arg}`);
-      } else openSettings("sandboxMode");
-      return;
-    case "/reasoning":
-      if (["minimal","low","medium","high","xhigh"].includes(arg)) {
-        state.settings.modelReasoningEffort = arg; save("settings", state.settings); appendSystem(`reasoning → ${arg}`);
-      } else openSettings("modelReasoningEffort");
-      return;
-    case "/web-search":
-      if (["disabled","cached","live"].includes(arg)) {
-        state.settings.webSearchMode = arg; save("settings", state.settings); appendSystem(`web search → ${arg}`);
-      } else openSettings("webSearchMode");
-      return;
-    case "/network":
-      state.settings.networkAccessEnabled = !state.settings.networkAccessEnabled;
-      save("settings", state.settings);
-      appendSystem(`network access → ${state.settings.networkAccessEnabled ? "on" : "off"}`);
-      return;
-    case "/resume":
-      appendSystem("Pick a thread from the sidebar to resume.");
-      return;
-    case "/reset":
-      // Canonical reset: interrupt any in-flight turn and start a fresh
-      // thread on the next user turn. Mirrors codex-tui's /reset.
-      if (state.activeThreadId && state.activeTurnId) {
-        rpcCall("turn/interrupt", {
-          threadId: state.activeThreadId,
-          turnId: state.activeTurnId,
-        }).catch(() => {});
-      }
-      newThread();
-      appendSystem("Conversation reset.");
-      return;
-    case "/compact":
-      // Canonical compaction: ask the backend to summarize and prune
-      // conversation history. Mirrors codex-tui's /compact.
-      if (!state.activeThreadId) { appendSystem("No active thread to compact.", "error"); return; }
-      rpcCall("thread/compact/start", { threadId: state.activeThreadId })
-        .then(() => appendSystem("Compact requested."))
-        .catch((e) => appendSystem(`compact failed: ${e.message}`, "error"));
-      return;
-    default:
-      appendSystem(`unknown command: ${cmd}`, "error");
-  }
-}
-
-function updateStatusBar() {
-  const w = state.whoami ?? {};
-  const backendPill = $("#backend-pill");
-  backendPill.textContent = `backend: ${w.backend ?? "?"}`;
-  backendPill.className = "pill " + (w.backend === "real" ? "ok" : "warn");
-  $("#model-pill").textContent = `model: ${state.settings.model}`;
-  $("#approval-pill").textContent = `approvals: ${state.settings.approvalPolicy}`;
-  $("#sandbox-pill").textContent = `sandbox: ${state.settings.sandboxMode}`;
-}
-
-// ---------- modals: login / settings ----------
-function modal(html, onMount) {
-  const root = $("#modal-root");
-  root.innerHTML = `<div class="modal-backdrop"><div class="modal">${html}</div></div>`;
-  root.querySelector(".modal-backdrop").addEventListener("click", (e) => {
-    if (e.target.classList.contains("modal-backdrop")) closeModal();
-  });
-  if (onMount) onMount(root.querySelector(".modal"));
-}
-function closeModal() { $("#modal-root").innerHTML = ""; }
-
-function waitForReady(timeoutMs = 5000) {
-  return new Promise((resolve) => {
-    if (state.ws && state.ws.readyState === WebSocket.OPEN && state.initialized) return resolve();
-    const t = setTimeout(() => { window.removeEventListener("codex:ready", on); resolve(); }, timeoutMs);
-    function on() { clearTimeout(t); window.removeEventListener("codex:ready", on); resolve(); }
-    window.addEventListener("codex:ready", on);
-  });
+function showCliOnlyBanner(feature) {
+  renderers.appendSystem(`${feature} is not available in the web build. Use the CLI for that workflow.`, "error");
 }
 
 function onAccountClick() {
-  if (state.whoami?.hasApiKey || state.whoami?.hasOauth) doLogout();
-  else openLogin();
-}
-
-function openLogin() {
-  modal(`
-    <h2>Sign in to Codex</h2>
-    <p>Choose a sign-in method. Credentials are stored only on the server, tied to your session cookie.</p>
-    <div class="modal-row">
-      <button id="chatgpt" class="primary" style="width:100%">Sign in with ChatGPT</button>
-    </div>
-    <div class="modal-row" style="opacity:.6;text-align:center;font-size:12px">— or —</div>
-    <div class="modal-row"><label>OpenAI API key</label><input id="apikey" type="password" placeholder="sk-…" autofocus /></div>
-    <div class="modal-actions">
-      <button id="cancel" class="ghost">Cancel</button>
-      <button id="save" class="primary">Use API key</button>
-    </div>
-    <div id="oauth-status" class="muted" style="font-size:12px;margin-top:8px"></div>
-  `, (m) => {
-    m.querySelector("#cancel").addEventListener("click", closeModal);
-    m.querySelector("#chatgpt").addEventListener("click", async () => {
-      const status = m.querySelector("#oauth-status");
-      status.textContent = "Starting ChatGPT sign-in…";
-      try {
-        // Seed gateway-side OAuth bookkeeping, then drive the canonical
-        // `account/login/start` JSON-RPC request. The gateway forwards it
-        // verbatim and intercepts the `account/updated` notification to
-        // persist the resulting token in the session.
-        await fetch("/api/oauth/chatgpt/start", { method: "POST" });
-        // Canonical v2 LoginAccountParams: { type: "chatgptDeviceCode" }.
-        // Response is { type: "chatgptDeviceCode", loginId, verificationUrl, userCode }.
-        const r = await rpcCall("account/login/start", { type: "chatgptDeviceCode" });
-        const verificationUrl = r?.verificationUrl ?? r?.authUrl;
-        const userCode = r?.userCode;
-        status.innerHTML = userCode
-          ? `Open <a href="${escapeHtml(verificationUrl)}" target="_blank" rel="noopener">${escapeHtml(verificationUrl)}</a> and enter code <code>${escapeHtml(userCode)}</code>.`
-          : `Open <a href="${escapeHtml(verificationUrl)}" target="_blank" rel="noopener">${escapeHtml(verificationUrl)}</a> to continue.`;
-        // The mock backend resolves the OAuth flow via an `account/updated`
-        // notification; that handler closes the modal.
-        const onSignedIn = () => { closeModal(); window.removeEventListener("codex:signedIn", onSignedIn); };
-        window.addEventListener("codex:signedIn", onSignedIn);
-      } catch (e) {
-        status.textContent = `OAuth failed: ${e.message}`;
-      }
-    });
-    m.querySelector("#save").addEventListener("click", async () => {
-      const key = m.querySelector("#apikey").value.trim();
-      if (!key) return;
-      const r = await fetch("/api/login", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: key }),
-      });
-      if (r.ok) {
-        await refreshWhoAmI();
-        updateStatusBar();
-        appendSystem("Signed in with API key.");
-        closeModal();
-        // Reconnect WS so the new auth is in the child env.
-        if (state.ws) state.ws.close();
-      } else {
-        const data = await r.json().catch(() => ({}));
-        appendSystem(`Login failed: ${data.error ?? r.status}`, "error");
-      }
-    });
-  });
-}
-
-async function openMcpModal() {
-  modal(`
-    <h2>MCP servers</h2>
-    <p>Servers configured via <code>~/.codex/config.toml</code> (and added here for this session).</p>
-    <div id="mcp-list"><div class="muted">Loading…</div></div>
-    <div class="modal-row" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
-      <label>Add a new server</label>
-      <input id="mcp-name" placeholder="server name" />
-      <input id="mcp-cmd" placeholder="command (e.g. npx -y @modelcontextprotocol/server-filesystem /tmp)" style="margin-top:6px" />
-    </div>
-    <div class="modal-actions">
-      <button id="add" class="primary">Add</button>
-      <button id="reload">Reload</button>
-      <button id="close" class="ghost">Close</button>
-    </div>
-  `, async (m) => {
-    const refresh = async () => {
-      try {
-        // v2 ListMcpServerStatusResponse: { data: McpServerStatus[], nextCursor }.
-        const r = await rpcCall("mcpServerStatus/list", {});
-        const list = m.querySelector("#mcp-list");
-        const servers = r?.data ?? r?.servers ?? [];
-        if (servers.length === 0) {
-          list.innerHTML = `<div class="muted">No MCP servers configured.</div>`;
-        } else {
-          list.innerHTML = servers.map((s) => {
-            const startup = s.startupState ?? s.status ?? "?";
-            const ok = startup === "running" || startup === "connected";
-            const tools = (s.tools ?? []).map((t) => t.name ?? t).filter(Boolean);
-            return `
-            <div class="tool-card" style="margin-bottom:8px">
-              <div class="tc-head">
-                <span class="status-dot ${ok ? "completed" : "failed"}"></span>
-                <strong>${escapeHtml(s.name)}</strong>
-                <span class="muted">${escapeHtml(startup)}</span>
-              </div>
-              ${tools.length ? `<div class="tc-meta">tools: ${escapeHtml(tools.join(", "))}</div>` : ""}
-            </div>`;
-          }).join("");
-        }
-      } catch (e) {
-        m.querySelector("#mcp-list").innerHTML = `<div class="muted">Error: ${escapeHtml(e.message)}</div>`;
-      }
-    };
-    window.__mcpRefresh = refresh;
-    await refresh();
-    m.querySelector("#close").addEventListener("click", () => { window.__mcpRefresh = null; closeModal(); });
-    m.querySelector("#reload").addEventListener("click", async () => {
-      await rpcCall("config/mcpServer/reload", {}).catch(() => {});
-      await refresh();
-    });
-    m.querySelector("#add").addEventListener("click", async () => {
-      const name = m.querySelector("#mcp-name").value.trim();
-      const cmd  = m.querySelector("#mcp-cmd").value.trim();
-      if (!name || !cmd) return;
-      // Canonical v2 ConfigValueWriteParams: { keyPath, value, mergeStrategy }.
-      await rpcCall("config/value/write", {
-        keyPath: `mcp_servers.${name}`,
-        value: { command: cmd.split(" ")[0], args: cmd.split(" ").slice(1) },
-        mergeStrategy: "upsert",
-      }).catch(() => {});
-      await rpcCall("config/mcpServer/reload", {}).catch(() => {});
-      await refresh();
-    });
-  });
+  if (state.whoami?.hasApiKey || state.whoami?.hasOauth) {
+    void doLogout();
+  } else {
+    modals.openLogin();
+  }
 }
 
 async function doLogout() {
   await fetch("/api/logout", { method: "POST" });
+  renderers.clearAuthRequiredCard();
   await refreshWhoAmI();
   updateStatusBar();
-  appendSystem("Signed out.");
-}
-
-function openSettings(focus) {
-  const s = state.settings;
-  const sel = (name, options) =>
-    `<select name="${name}">${options.map((o) => `<option value="${o}" ${s[name] === o ? "selected" : ""}>${o}</option>`).join("")}</select>`;
-  modal(`
-    <h2>Settings</h2>
-    <p>Mirrors the TUI's <code>/model</code>, <code>/approvals</code>, and <code>/sandbox</code> menus.</p>
-    <div class="modal-row"><label>Model</label><input name="model" value="${escapeHtml(s.model)}" /></div>
-    <div class="modal-row"><label>Approval policy</label>${sel("approvalPolicy", ["never","on-request","on-failure","untrusted"])}</div>
-    <div class="modal-row"><label>Sandbox</label>${sel("sandboxMode", ["read-only","workspace-write","danger-full-access"])}</div>
-    <div class="modal-row"><label>Reasoning effort</label>${sel("modelReasoningEffort", ["minimal","low","medium","high","xhigh"])}</div>
-    <div class="modal-row"><label>Web search</label>${sel("webSearchMode", ["disabled","cached","live"])}</div>
-    <div class="modal-row"><label><input type="checkbox" name="networkAccessEnabled" ${s.networkAccessEnabled ? "checked" : ""} /> Allow network access in sandbox</label></div>
-    <div class="modal-row"><label>Server working directory</label><input value="${escapeHtml(state.whoami?.workdir ?? "")}" disabled /></div>
-    <div class="modal-actions">
-      <button id="cancel" class="ghost">Cancel</button>
-      <button id="save" class="primary">Save</button>
-    </div>
-  `, (m) => {
-    if (focus) {
-      const f = m.querySelector(`[name="${focus}"]`);
-      if (f) f.focus();
-    }
-    m.querySelector("#cancel").addEventListener("click", closeModal);
-    m.querySelector("#save").addEventListener("click", async () => {
-      for (const k of ["model","approvalPolicy","sandboxMode","modelReasoningEffort","webSearchMode"]) {
-        const node = m.querySelector(`[name="${k}"]`);
-        if (node) state.settings[k] = node.value;
-      }
-      state.settings.networkAccessEnabled = m.querySelector(`[name="networkAccessEnabled"]`).checked;
-      save("settings", state.settings);
-      updateStatusBar();
-      // Push to the backend over the canonical config/value/write method so
-      // settings actually take effect on the next turn.
-      await pushSettingsToBackend();
-      closeModal();
-    });
-  });
-}
-
-// ---------- helpers ----------
-function el(tag, attrs = {}) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === false || v == null) continue;
-    if (k === "class") node.className = v;
-    else node.setAttribute(k, v);
-  }
-  return node;
-}
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-}
-function renderMarkdownish(text) {
-  // Very small subset: code fences, inline code, bold, italic, links.
-  // Keeps the bundle dependency-free while showing reasonable formatting.
-  let out = escapeHtml(text);
-  out = out.replace(/```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)```/g, (_m, _lang, code) =>
-    `<pre><code>${code}</code></pre>`);
-  out = out.replace(/`([^`\n]+)`/g, (_m, code) => `<code>${code}</code>`);
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  out = out.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  return out;
+  renderers.appendSystem("Signed out.");
 }
 
 bootstrap();

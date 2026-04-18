@@ -26,7 +26,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd web && npm start"
+args = "cd web && CODEX_BIN=${CODEX_BIN:-$HOME/codex-bin/codex-app-server} npm start"
 waitForPort = 5000
 
 [[ports]]

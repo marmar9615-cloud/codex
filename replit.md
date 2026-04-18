@@ -1,65 +1,42 @@
-# OpenAI Codex — Web App (browser parity with TUI)
+# Replit Deploy Notes
 
-## Project Overview
-This repo is the upstream OpenAI Codex CLI project (a Rust-based coding agent) plus a new browser front-end under `web/` that brings the TUI experience into a hosted web app.
+This web app now runs against a real backend only. Replit should build and run
+the standalone `codex-app-server` binary, then point `web/server.mjs` at that
+binary through `CODEX_BIN`.
 
-- `web/` — **active workspace.** Node.js Express + WebSocket gateway and single-page browser UI.
-- `codex-rs/` — original Rust workspace with the core agent and the `codex-tui` binary.
-- `codex-cli/` — original Node.js wrapper CLI (managed with pnpm).
-- `sdk/typescript/` — official TypeScript SDK; the gateway speaks the same `codex exec --experimental-json` JSONL protocol it uses.
+## One-time build
 
-## Running the App
-The workflow "Start application" launches the web app gateway on port 5000 (`cd web && npm start`). The browser UI is served at `/`.
-
-**Built binary location:** `codex-rs/target/debug/codex-tui`
-
-To use it interactively, open the Shell and run:
 ```bash
-cd codex-rs && ./target/debug/codex-tui --help
+cd /Users/marmar/Desktop/codex
+./web/scripts/build-codex-bin.sh
 ```
 
-## Architecture Notes
+This installs the backend at:
 
-### Web App (web/)
-- **Gateway:** `web/server.mjs` — Express + `ws`. **Strictly transparent JSON-RPC 2.0 pass-through.** Per WebSocket it spawns the real Rust `codex app-server` (or `web/mock-codex.mjs`) and pipes raw JSON-RPC frames in both directions. The gateway does not invent, rename, or wrap any methods — every byte on the WS is a canonical app-server-protocol frame. Operational metadata (backend kind, workdir, auth state) is exposed only via HTTP (`/api/whoami`); spawn/exit events surface as WebSocket close codes (4401 no session, 4500 spawn error, 4502 child exit). The HTTP surface is `/api/whoami`, `/api/login`, `/api/logout`, `/api/oauth/chatgpt/start`, `/api/threads`, `/api/file-search`. Cookies are http-only and `secure: true` whenever the request is HTTPS (or `NODE_ENV=production`).
-- **Backend selection:** if `$CODEX_BIN` is set, the gateway spawns `$CODEX_BIN app-server` per WebSocket. Otherwise it runs `web/mock-codex.mjs`, which speaks the same `app-server-protocol` JSON-RPC subset (initialize, thread/start, turn/start, turn/interrupt, mcpServerStatus/list, account/login/start, loginApiKey, item/* notifications, item/*/requestApproval server-initiated requests).
-- **Auth:** API key via `POST /api/login`; ChatGPT OAuth via `POST /api/oauth/chatgpt/start` followed by the canonical `account/login/start` JSON-RPC request. Sessions are isolated per HTTP-only `codexsid` cookie; each WebSocket spawns its own child app-server with that user's auth env. Credentials never leave the server.
-- **Approvals:** Real server-initiated JSON-RPC requests. The child app-server sends `item/commandExecution/requestApproval` / `item/fileChange/requestApproval`; the browser renders an approval card and replies with `decision: approved | approved_for_session | denied`. The child's `approval_policy` (set via `config/value/write` or config.toml) is honored by app-server itself — the gateway does not bypass it.
-- **MCP servers:** `/mcp` slash command opens a panel that calls `mcpServerStatus/list`, `config/mcpServer/reload`, and `config/value/write` — exactly the methods the TUI uses.
-- **Browser UI:** `web/public/{index.html,app.js,styles.css}` — vanilla ES module, no build step. JSON-RPC 2.0 client with full request/response/notification routing; dark theme; sessions sidebar with thread resume; streaming agent messages; tool-call cards for shell/apply_patch/mcp/web_search/plan; inline approval prompts; slash-command palette with `/` autocomplete; `@`-file autocomplete via `/api/file-search`; settings/login/MCP modals; reconnecting WebSocket.
-- **Per-session workdir:** `web/.workdirs/<sessionId>/`.
-- **End-to-end test:** `web/tests/e2e.spec.mjs` is a Playwright spec covering ChatGPT sign-in, exec+patch approvals, streamed agent message, and MCP listing. Run with `cd web && npx playwright install chromium && BASE_URL=http://localhost:5000 npx playwright test`.
+```bash
+$HOME/codex-bin/codex-app-server
+```
 
-### Rust Workspace (codex-rs/)
-- **Target binary:** `codex-tui` (in `codex-rs/tui/`)
-- **Build command:** `cd codex-rs && cargo build -p codex-tui --bin codex-tui --ignore-rust-version`
-- **Rust version:** Replit provides rustc 1.88.0 (project requires ≥1.89 for some unstable features)
+## Run workflow
 
-### Compatibility Patches Applied
-The project requires Rust 1.89+ features not available in Replit's 1.88.0. The following patches were applied:
+The `.replit` workflow starts:
 
-1. **smol_str-0.3.5** (registry cache): `[0; _]` → `[0; INLINE_CAP]` — const array length inference
-2. **asynk-strim-0.1.5** (registry cache): `NonNull::from_mut()` → `NonNull::new_unchecked()` — stabilized in 1.89
-3. **rama-net-0.3.0-alpha.4** (registry cache): `Duration::from_hours()` → `Duration::from_secs()` conversion
-4. **codex-rs/execpolicy/src/amend.rs**: `File::lock()` → libc `flock()` (unstable in 1.88)
-5. **codex-rs/arg0/src/lib.rs**: `File::try_lock()` → libc `flock(LOCK_NB)` (unstable in 1.88)
-6. **codex-rs/core/src/message_history.rs**: `File::try_lock()` / `try_lock_shared()` → libc flock
-7. **codex-rs/core/src/installation_id.rs**: `File::lock()` → libc `flock(LOCK_EX)` (unstable in 1.88)
+```bash
+cd web && CODEX_BIN=${CODEX_BIN:-$HOME/codex-bin/codex-app-server} npm start
+```
 
-All patches use `--ignore-rust-version` flag to bypass the workspace's `rust-version` requirement.
+## Smoke path after boot
 
-### Dependencies
-- `libc` crate added to: `codex-rs/execpolicy/Cargo.toml`, `codex-rs/arg0/Cargo.toml`
-- `libc` was already in: `codex-rs/core/Cargo.toml`
+1. Open the Replit webview or public URL.
+2. Confirm the status bar says `backend: real`.
+3. Confirm the model pill populates from `model/list`.
+4. Try an unauthenticated prompt and confirm you get one auth-required card,
+   not repeated retry spam.
+5. Start ChatGPT sign-in and confirm the modal shows the device code directly.
+6. Finish the device-code flow in a browser tab and confirm the account pill
+   updates without restarting the app.
 
-### Registry Cache Location
-`$CARGO_HOME` = `/home/runner/workspace/.local/share/.cargo`
-Patched cached crates at: `.local/share/.cargo/registry/src/index.crates.io-*/`
+## Deployment
 
-## Build Time
-Initial build takes ~8-10 minutes (includes V8 JavaScript engine compilation via `gn`/`ninja`). Incremental rebuilds are much faster.
-
-## Workflow
-- **Name:** "Start application"
-- **Type:** console (TUI app, not web)
-- **Command:** `cd codex-rs && cargo build -p codex-tui --bin codex-tui --ignore-rust-version 2>&1 && echo 'Build complete' && ./target/debug/codex-tui --help`
+Use the same command for Replit Deployments. The public deployment still needs
+`CODEX_BIN` pointing at the built standalone backend path shown above.
