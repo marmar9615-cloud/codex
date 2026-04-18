@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Project State & Environment Snapshot</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: #121a33;
+        --panel-2: #182246;
+        --text: #e6ebff;
+        --muted: #9aa6c7;
+        --accent: #7aa2ff;
+        --accent-2: #9cffd7;
+        --warn: #ffd479;
+        --border: #243066;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+      header {
+        padding: 40px 24px 24px;
+        background: radial-gradient(1200px 400px at 20% -10%, #1f2a5e 0%, transparent 60%),
+                    radial-gradient(900px 300px at 90% 0%, #2a1f5e 0%, transparent 60%);
+        border-bottom: 1px solid var(--border);
+      }
+      .wrap { max-width: 980px; margin: 0 auto; }
+      h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -0.01em; }
+      h2 { font-size: 18px; margin: 0 0 12px; color: var(--accent); letter-spacing: 0.02em; text-transform: uppercase; }
+      p.lead { color: var(--muted); margin: 0; }
+      main { padding: 24px; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px;
+      }
+      .card.full { grid-column: 1 / -1; }
+      .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+      .row:last-child { border-bottom: 0; }
+      .label { color: var(--muted); font-size: 13px; }
+      .value { font-weight: 600; font-size: 14px; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 3px 10px; border-radius: 999px;
+        background: var(--panel-2); border: 1px solid var(--border);
+        color: var(--text); font-size: 12px;
+      }
+      .pill.warn { color: var(--warn); border-color: #5a4416; background: #2a1f0c; }
+      .pill.ok   { color: var(--accent-2); border-color: #1c5a45; background: #0c2a22; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; }
+      ul.clean { list-style: none; padding: 0; margin: 0; }
+      ul.clean li { padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 14px; }
+      ul.clean li:last-child { border-bottom: 0; }
+      code { background: var(--panel-2); padding: 1px 6px; border-radius: 6px; font-size: 12.5px; }
+      footer { color: var(--muted); padding: 24px; text-align: center; font-size: 12px; }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap">
+        <h1>Project State &amp; Environment Snapshot</h1>
+        <p class="lead">A visual representation of the project context as of April 18, 2026.</p>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="grid">
+        <div class="card">
+          <h2>Date</h2>
+          <div class="row"><span class="label">Today</span><span class="value">April 18, 2026</span></div>
+        </div>
+
+        <div class="card">
+          <h2>Workflows</h2>
+          <div class="row">
+            <span class="label">Configured</span>
+            <span class="pill warn"><span class="dot"></span>None</span>
+          </div>
+          <p class="label" style="margin-top:8px">There are no workflows configured yet.</p>
+        </div>
+
+        <div class="card">
+          <h2>Integrations</h2>
+          <div class="row">
+            <span class="label">Added</span>
+            <span class="pill warn"><span class="dot"></span>None</span>
+          </div>
+          <p class="label" style="margin-top:8px">No integrations are currently added.</p>
+        </div>
+
+        <div class="card">
+          <h2>MCP Servers</h2>
+          <div class="row">
+            <span class="label">Configured</span>
+            <span class="pill warn"><span class="dot"></span>None</span>
+          </div>
+          <p class="label" style="margin-top:8px">No MCP servers configured.</p>
+        </div>
+      </section>
+
+      <section class="card full">
+        <h2>Required Follow-ups</h2>
+        <ul class="clean">
+          <li>
+            <strong>Code Review</strong> — Run a code review after completing the request and fix severe issues immediately.
+          </li>
+          <li>
+            <strong>Testing</strong> — Verify changes with end-to-end tests, especially for frontend features and user flows.
+          </li>
+          <li>
+            <strong>Important Reminder</strong> — Do what has been asked; nothing more, nothing less.
+          </li>
+        </ul>
+      </section>
+
+      <section class="card full" style="margin-top:16px">
+        <h2>Summary</h2>
+        <p style="margin:0; color:var(--muted)">
+          This page reflects the project snapshot: today's date is <code>April 18, 2026</code>,
+          there are no <code>workflows</code>, no <code>integrations</code>, and no <code>MCP servers</code>
+          configured. After implementing changes, code review and testing are required follow-ups.
+        </p>
+      </section>
+    </main>
+
+    <footer>Generated from the project state &amp; environment snapshot.</footer>
+  </body>
+</html>
