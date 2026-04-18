@@ -21,12 +21,13 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "webview"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd codex-rs && cargo build -p codex-tui --bin codex-tui --ignore-rust-version 2>&1 && echo 'Build complete' && ./target/debug/codex-tui --help"
-
-[workflows.workflow.metadata]
-outputType = "console"
+args = "cd web && npm start"
+waitForPort = 5000
 
 [[ports]]
 localPort = 5000

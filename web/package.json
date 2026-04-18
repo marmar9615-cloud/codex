@@ -1,0 +1,16 @@
+{
+  "name": "codex-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-based front-end for Codex CLI with parity to codex-tui.",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.1",
+    "cookie-parser": "^1.4.6"
+  }
+}
