@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Browser-based front-end for Codex CLI with parity to codex-tui.",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test:e2e": "playwright test"
   },
   "engines": { "node": ">=18" },
   "dependencies": {

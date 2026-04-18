@@ -1,193 +1,312 @@
 #!/usr/bin/env node
-// mock-codex — emits realistic Codex `exec --experimental-json` events so the
-// web UI can be exercised end-to-end without the Rust binary or an API key.
+// Mock `codex app-server` — speaks a subset of `app-server-protocol` JSON-RPC
+// over stdio so the web UI can be exercised end-to-end without the real
+// Rust binary or an OpenAI API key.
 //
-// Reads the user prompt on stdin (one shot), emits JSONL events on stdout.
-// Out-of-band approval requests/responses use a custom envelope so the
-// gateway can intercept them.
+// Wire format: newline-delimited JSON-RPC 2.0 messages on stdin/stdout,
+// matching `codex app-server --transport stdio`. The browser sends
+// `ClientRequest` envelopes; this process replies with `ClientResponse`
+// envelopes and emits `ServerNotification` / `ServerRequest` envelopes for
+// thread/turn lifecycle events and approval prompts.
+//
+// Implemented methods (subset):
+//   initialize, thread/start, turn/start, turn/interrupt,
+//   mcpServerStatus/list, account/login/start, account/logout,
+//   loginApiKey, item/* request approvals (server -> client requests),
+//   thread/list (returns []), serverRequest/resolved (no-op).
 
-import { randomUUID } from "node:crypto";
-import { writeFile, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 
-const out = (obj) => { process.stdout.write(JSON.stringify(obj) + "\n"); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const out = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
+const notify = (method, params) => out({ jsonrpc: "2.0", method, params });
+const respond = (id, result) => out({ jsonrpc: "2.0", id, result });
+const respondErr = (id, code, message) => out({ jsonrpc: "2.0", id, error: { code, message } });
 
-const APPROVAL_POLICY = process.env.MOCK_APPROVAL_POLICY ?? "on-request";
-const WORKDIR = process.env.MOCK_WORKDIR ?? process.cwd();
-const MODEL = process.env.MOCK_MODEL ?? "mock-gpt";
-const RESUME_THREAD_ID = process.env.MOCK_THREAD_ID || "";
+let nextServerReqId = 1;
+let pendingServerRequests = new Map(); // id -> {resolve}
+const sessionApprovals = new Set();    // commands approved-for-session
+const mcpServers = [
+  { name: "demo-fs", status: "connected", tools: ["read_file", "write_file", "list_dir"] },
+];
+const threads = new Map(); // id -> {name, lastActive}
 
-// Single line-based protocol on stdin:
-//   {type:"prompt", text:"..."}        — kicks off the turn (sent once)
-//   {type:"approval.response", approval_id, decision}
-const approvalWaiters = new Map();
-let promptResolver = null;
-function readPrompt() {
-  return new Promise((resolve) => { promptResolver = resolve; });
-}
-const rl = readline.createInterface({ input: process.stdin, terminal: false });
-rl.on("line", (line) => {
-  if (!line.trim()) return;
-  let m;
-  try { m = JSON.parse(line); } catch { return; }
-  if (m.type === "prompt" && promptResolver) {
-    const r = promptResolver; promptResolver = null;
-    r(String(m.text ?? ""));
-  } else if (m.type === "approval.response") {
-    const cb = approvalWaiters.get(m.approval_id);
-    if (cb) { approvalWaiters.delete(m.approval_id); cb(m.decision); }
-  }
-});
+const rl = readline.createInterface({ input: process.stdin });
 
-function requestApproval(request) {
-  return new Promise((resolve) => {
-    const id = randomUUID();
-    approvalWaiters.set(id, resolve);
-    out({ type: "approval.request", approval_id: id, request });
+function ts() { return new Date().toISOString(); }
+
+function startTurn(conversationId, turnId, prompt) {
+  notify("turn/started", { conversationId, turnId, startedAt: ts() });
+
+  const lower = String(prompt).toLowerCase();
+  const wantPlan   = /\bplan\b/.test(lower);
+  const wantApply  = /\bpatch\b|\bapply\b|\bedit\b/.test(lower);
+  const wantExec   = /\brun\b|\bshell\b|\bexec\b/.test(lower);
+  const wantSearch = /\bsearch\b|\bweb\b/.test(lower);
+  const wantMcp    = /\bmcp\b|\bdemo[-_]?fs\b/.test(lower);
+  const wantError  = /\berror\b|\bfail\b/.test(lower);
+
+  let p = Promise.resolve();
+  if (wantPlan) p = p.then(() => emitPlan(conversationId));
+  if (wantSearch) p = p.then(() => emitWebSearch(conversationId));
+  if (wantMcp) p = p.then(() => emitMcp(conversationId));
+  if (wantExec) p = p.then(() => emitExec(conversationId));
+  if (wantApply) p = p.then(() => emitApply(conversationId));
+  if (wantError) p = p.then(() => emitErrorItem(conversationId));
+  p = p.then(() => emitAgentMessage(conversationId, prompt));
+  p.then(() => {
+    notify("turn/completed", {
+      conversationId, turnId, completedAt: ts(),
+      usage: { input_tokens: 42 + (prompt?.length ?? 0), output_tokens: 88 },
+    });
   });
 }
 
-async function streamAgentMessage(text) {
-  const id = randomUUID();
-  out({ type: "item.started", item: { id, type: "agent_message", text: "" } });
-  let acc = "";
-  // emit roughly word-by-word
-  const tokens = text.split(/(\s+)/);
-  for (const tok of tokens) {
-    acc += tok;
-    out({ type: "item.updated", item: { id, type: "agent_message", text: acc } });
-    await sleep(15 + Math.floor(Math.random() * 30));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function emitAgentMessage(conversationId, prompt) {
+  const itemId = "msg-" + randomUUID().slice(0, 8);
+  notify("item/started", {
+    conversationId,
+    item: { id: itemId, type: "agent_message", text: "", status: "in_progress" },
+  });
+  const text = `Mock backend echo: I would help with "${(prompt ?? "").trim()}".`;
+  for (const word of text.split(/(\s+)/)) {
+    if (!word) continue;
+    notify("item/agentMessage/delta", { conversationId, itemId, delta: word });
+    await sleep(20);
   }
-  out({ type: "item.completed", item: { id, type: "agent_message", text: acc } });
+  notify("item/completed", {
+    conversationId,
+    item: { id: itemId, type: "agent_message", text, status: "completed" },
+  });
 }
 
-async function commandExec(command, output, exitCode = 0) {
-  const id = randomUUID();
-  out({ type: "item.started", item: { id, type: "command_execution", command, aggregated_output: "", status: "in_progress" } });
-  let acc = "";
-  for (const line of output.split("\n")) {
-    acc += line + "\n";
-    out({ type: "item.updated", item: { id, type: "command_execution", command, aggregated_output: acc, status: "in_progress" } });
-    await sleep(40);
-  }
-  out({
-    type: "item.completed",
+async function emitPlan(conversationId) {
+  const itemId = "plan-" + randomUUID().slice(0, 6);
+  const items = [
+    { text: "Read the request", completed: true },
+    { text: "Draft a plan",     completed: true },
+    { text: "Execute the plan", completed: false },
+  ];
+  notify("item/completed", {
+    conversationId,
+    item: { id: itemId, type: "todo_list", items, status: "completed" },
+  });
+}
+
+async function emitWebSearch(conversationId) {
+  const itemId = "ws-" + randomUUID().slice(0, 6);
+  notify("item/completed", {
+    conversationId,
+    item: { id: itemId, type: "web_search", query: "codex app-server protocol", status: "completed" },
+  });
+}
+
+async function emitMcp(conversationId) {
+  const itemId = "mcp-" + randomUUID().slice(0, 6);
+  notify("item/completed", {
+    conversationId,
     item: {
-      id, type: "command_execution", command, aggregated_output: acc.trimEnd(),
-      exit_code: exitCode, status: exitCode === 0 ? "completed" : "failed",
+      id: itemId, type: "mcp_tool_call", server: "demo-fs", tool: "list_dir",
+      arguments: { path: "." }, result: { entries: ["README.md", "src/", "package.json"] },
+      status: "completed",
     },
   });
 }
 
-async function fileChange(changes, status = "completed") {
-  const id = randomUUID();
-  out({ type: "item.started", item: { id, type: "file_change", changes, status: "completed" } });
-  out({ type: "item.completed", item: { id, type: "file_change", changes, status } });
-}
-
-async function reasoning(text) {
-  const id = randomUUID();
-  out({ type: "item.started", item: { id, type: "reasoning", text: "" } });
-  let acc = "";
-  for (const tok of text.split(/(\s+)/)) {
-    acc += tok;
-    out({ type: "item.updated", item: { id, type: "reasoning", text: acc } });
-    await sleep(8);
+async function emitExec(conversationId) {
+  const itemId = "cmd-" + randomUUID().slice(0, 6);
+  const cmd = "ls -la";
+  notify("item/started", {
+    conversationId,
+    item: { id: itemId, type: "command_execution", command: cmd, status: "pending_approval" },
+  });
+  const decision = await requestExecApproval(conversationId, itemId, cmd);
+  if (decision === "denied") {
+    notify("item/completed", {
+      conversationId,
+      item: { id: itemId, type: "command_execution", command: cmd, status: "rejected" },
+    });
+    return;
   }
-  out({ type: "item.completed", item: { id, type: "reasoning", text: acc } });
+  notify("item/completed", {
+    conversationId,
+    item: {
+      id: itemId, type: "command_execution", command: cmd, status: "completed",
+      exit_code: 0,
+      aggregated_output: "drwxr-xr-x  3 user  staff   96 Apr 18 12:00 .\ndrwxr-xr-x 12 user  staff  384 Apr 18 12:00 ..\n-rw-r--r--  1 user  staff   42 Apr 18 12:00 README.md\n",
+    },
+  });
 }
 
-async function main() {
-  const prompt = (await readPrompt()).trim();
+async function emitApply(conversationId) {
+  const itemId = "fc-" + randomUUID().slice(0, 6);
+  const changes = [{
+    kind: "modify", path: "README.md",
+    diff: "--- a/README.md\n+++ b/README.md\n@@\n-Hello\n+Hello, Codex!\n",
+  }];
+  notify("item/started", {
+    conversationId,
+    item: { id: itemId, type: "file_change", changes, status: "pending_approval" },
+  });
+  const decision = await requestPatchApproval(conversationId, itemId, changes);
+  if (decision === "denied") {
+    notify("item/completed", {
+      conversationId,
+      item: { id: itemId, type: "file_change", changes, status: "rejected" },
+    });
+    return;
+  }
+  notify("item/completed", {
+    conversationId,
+    item: { id: itemId, type: "file_change", changes, status: "completed" },
+  });
+}
 
-  const threadId = RESUME_THREAD_ID || `mock-${randomUUID().slice(0, 8)}`;
-  out({ type: "thread.started", thread_id: threadId });
-  out({ type: "turn.started" });
+async function emitErrorItem(conversationId) {
+  const itemId = "err-" + randomUUID().slice(0, 6);
+  notify("item/completed", {
+    conversationId,
+    item: { id: itemId, type: "error", message: "Simulated tool failure (mock)", status: "failed" },
+  });
+}
 
-  const lower = prompt.toLowerCase();
+function requestExecApproval(conversationId, callId, command) {
+  const key = "exec:" + command;
+  if (sessionApprovals.has(key)) return Promise.resolve("approved");
+  return serverRequest("item/commandExecution/requestApproval", {
+    conversationId, callId, command: command.split(" "), cwd: process.env.MOCK_WORKDIR || ".",
+    reason: "mock backend would execute this command",
+    parsedCmd: [],
+  }).then((decision) => {
+    if (decision === "approved_for_session") sessionApprovals.add(key);
+    return decision === "denied" ? "denied" : "approved";
+  });
+}
 
-  // simulate reasoning
-  await reasoning(`The user said: "${prompt.slice(0, 120)}". I will ${pickIntent(lower)}.`);
+function requestPatchApproval(conversationId, callId, changes) {
+  const file_changes = {};
+  for (const c of changes) file_changes[c.path] = { kind: c.kind, diff: c.diff };
+  return serverRequest("item/fileChange/requestApproval", {
+    conversationId, callId, file_changes,
+    reason: "mock backend would write these files",
+  }).then((decision) => decision === "denied" ? "denied" : "approved");
+}
 
-  // Branch on intent so the UI exercises every item type.
-  if (lower.includes("error") || lower.includes("fail")) {
-    await streamAgentMessage("I'll try to run a failing command to demonstrate error handling.");
-    await commandExec("ls /nonexistent-path", "ls: cannot access '/nonexistent-path': No such file or directory", 2);
-    await streamAgentMessage("As expected, the command failed with exit code 2.");
-  } else if (lower.includes("write") || lower.includes("create") || lower.includes("make a file")) {
-    await streamAgentMessage("I'll create a small file to show the diff viewer.");
-    if (APPROVAL_POLICY !== "never") {
-      const decision = await requestApproval({
-        kind: "apply_patch",
-        summary: "Create example.txt",
-        files: [{ path: "example.txt", kind: "add" }],
-      });
-      if (decision !== "approve" && decision !== "approve-session") {
-        await streamAgentMessage("OK, I won't make that change.");
-        out({ type: "turn.completed", usage: { input_tokens: 42, cached_input_tokens: 0, output_tokens: 24 } });
-        return;
-      }
-    }
-    const path = "example.txt";
-    await mkdir(dirname(join(WORKDIR, path)), { recursive: true }).catch(() => {});
-    await writeFile(join(WORKDIR, path), "Hello from Codex Web!\n");
-    await fileChange([{ path, kind: "add" }]);
-    await streamAgentMessage("Done — created `example.txt` in the working directory.");
-  } else if (lower.includes("search") || lower.includes("web")) {
-    const id = randomUUID();
-    out({ type: "item.started", item: { id, type: "web_search", query: prompt.slice(0, 80) } });
-    await sleep(400);
-    out({ type: "item.completed", item: { id, type: "web_search", query: prompt.slice(0, 80) } });
-    await streamAgentMessage("I searched the web and synthesized the results above.");
-  } else if (lower.includes("plan") || lower.includes("todo")) {
-    const id = randomUUID();
-    const items = [
-      { text: "Investigate the request", completed: true },
-      { text: "Draft an approach", completed: true },
-      { text: "Implement the change", completed: false },
-      { text: "Verify and report back", completed: false },
-    ];
-    out({ type: "item.started", item: { id, type: "todo_list", items } });
-    out({ type: "item.completed", item: { id, type: "todo_list", items } });
-    await streamAgentMessage("Here's my plan. I'll proceed step by step.");
-  } else {
-    if (APPROVAL_POLICY !== "never") {
-      const decision = await requestApproval({
-        kind: "exec",
-        command: "ls -la",
-        cwd: WORKDIR,
-        reason: "List files to understand the working directory",
-      });
-      if (decision === "approve" || decision === "approve-session") {
-        await commandExec("ls -la", "total 8\ndrwxr-xr-x 2 user user 4096 Apr 18 14:50 .\ndrwxr-xr-x 4 user user 4096 Apr 18 14:50 ..\n", 0);
-      } else {
-        await streamAgentMessage("OK, skipping the exec.");
-      }
-    } else {
-      await commandExec("echo hello", "hello", 0);
-    }
-    await streamAgentMessage(
-      `Hi! I'm running in mock mode (model: \`${MODEL}\`). ` +
-      "Try prompts that contain words like *write*, *plan*, *search*, or *error* " +
-      "to see different tool-call cards. Set the `CODEX_BIN` env var on the server " +
-      "and sign in to use the real Codex backend."
-    );
+function serverRequest(method, params) {
+  return new Promise((resolve) => {
+    const id = `srv-${nextServerReqId++}`;
+    pendingServerRequests.set(id, { resolve });
+    out({ jsonrpc: "2.0", id, method, params });
+  });
+}
+
+function handleClientResponse(msg) {
+  const pending = pendingServerRequests.get(msg.id);
+  if (!pending) return;
+  pendingServerRequests.delete(msg.id);
+  const decision = msg.result?.decision ?? "denied";
+  pending.resolve(decision);
+}
+
+rl.on("line", (line) => {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (!msg || typeof msg !== "object") return;
+
+  // Responses to server-initiated requests (approvals)
+  if (msg.id !== undefined && msg.method === undefined) {
+    handleClientResponse(msg);
+    return;
   }
 
-  out({ type: "turn.completed", usage: { input_tokens: 128, cached_input_tokens: 0, output_tokens: 256 } });
-}
+  switch (msg.method) {
+    case "initialize":
+      respond(msg.id, {
+        userAgent: "codex-web-mock/0.1",
+        codexHome: process.env.CODEX_HOME || ".codex",
+        platformFamily: "unix",
+        platformOs: process.platform,
+      });
+      return;
 
-function pickIntent(p) {
-  if (p.includes("error")) return "demonstrate an error";
-  if (p.includes("write") || p.includes("create")) return "create a file";
-  if (p.includes("search")) return "search the web";
-  if (p.includes("plan") || p.includes("todo")) return "draft a plan";
-  return "respond conversationally and run a small shell command";
-}
+    case "loginApiKey":
+      respond(msg.id, { ok: true });
+      return;
 
-main().then(() => process.exit(0)).catch((err) => {
-  out({ type: "error", message: err?.message ?? String(err) });
-  process.exit(1);
+    case "account/login/start": {
+      // Device-code stub. In real backend this returns a verification URL
+      // and resolves later via `account/updated` notification.
+      const verificationUri = "https://chat.openai.com/auth/device";
+      const userCode = "MOCK-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+      respond(msg.id, { verificationUri, userCode, expiresIn: 600 });
+      setTimeout(() => {
+        notify("account/updated", {
+          account: { email: "demo@chatgpt", plan: "pro" },
+          authMethod: "chatgpt",
+        });
+      }, 2000);
+      return;
+    }
+
+    case "account/logout":
+      respond(msg.id, { ok: true });
+      return;
+
+    case "mcpServerStatus/list":
+      respond(msg.id, { servers: mcpServers });
+      return;
+
+    case "config/mcpServer/reload":
+      respond(msg.id, { ok: true });
+      mcpServers.forEach((s) => notify("mcpServer/startupStatus/updated", { name: s.name, status: s.status }));
+      return;
+
+    case "thread/list":
+      respond(msg.id, { threads: [...threads.entries()].map(([id, m]) => ({ conversationId: id, ...m })) });
+      return;
+
+    case "thread/start": {
+      const conversationId = "thr-" + randomUUID().slice(0, 8);
+      threads.set(conversationId, { name: null, lastActive: Date.now() });
+      respond(msg.id, { conversationId });
+      notify("thread/started", { conversationId, startedAt: ts() });
+      return;
+    }
+
+    case "thread/resume": {
+      const conversationId = msg.params?.conversationId ?? "thr-" + randomUUID().slice(0, 8);
+      threads.set(conversationId, { name: null, lastActive: Date.now() });
+      respond(msg.id, { conversationId });
+      notify("thread/started", { conversationId, startedAt: ts(), resumed: true });
+      return;
+    }
+
+    case "turn/start": {
+      const conversationId = msg.params?.conversationId;
+      const turnId = "trn-" + randomUUID().slice(0, 8);
+      const input = msg.params?.input ?? [];
+      const prompt = Array.isArray(input)
+        ? input.filter((i) => i.type === "text").map((i) => i.text).join("\n\n")
+        : String(input);
+      respond(msg.id, { turnId });
+      queueMicrotask(() => startTurn(conversationId, turnId, prompt));
+      return;
+    }
+
+    case "turn/interrupt":
+      respond(msg.id, { abortReason: "user_interrupt" });
+      return;
+
+    case "serverRequest/resolved":
+      // Notification only; nothing to do here.
+      return;
+
+    default:
+      if (msg.id !== undefined) respondErr(msg.id, -32601, `method not supported in mock: ${msg.method}`);
+  }
 });
+
+// Greet the gateway with a banner so log-watchers see we're up.
+process.stderr.write("[mock-codex] ready (app-server-protocol subset)\n");

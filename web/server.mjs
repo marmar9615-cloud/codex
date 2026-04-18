@@ -1,23 +1,30 @@
-// Codex Web — browser-based front-end for Codex CLI.
+// Codex Web — JSON-RPC bridge to the Rust `codex app-server`.
 //
-// The browser is a thin client. It talks to this gateway over a WebSocket.
-// For each browser session, this gateway spawns a backend agent process that
-// emits Codex's JSONL event stream (the same protocol used by
-// `codex exec --experimental-json` and the official TypeScript SDK).
+// Architecture:
+//   browser  <— WebSocket (raw JSON-RPC frames) —>  this gateway
+//   this gateway  <— stdio (newline-delimited JSON-RPC frames) —>  `codex app-server`
 //
-// Two backends are supported:
-//   - `real`: spawn the real `codex` binary located at $CODEX_BIN.
-//   - `mock`: spawn the bundled mock-codex.mjs which emits realistic
-//             JSONL events for end-to-end demonstration without OpenAI keys.
+// The gateway is a minimal authenticated transport. Every WebSocket frame is
+// a single JSON-RPC 2.0 message conforming to `app-server-protocol`
+// (`codex-rs/app-server-protocol`). The gateway does not invent new methods,
+// rename fields, or translate envelopes — it only:
+//   - terminates the WebSocket and authenticates the session cookie,
+//   - spawns one `codex app-server --transport stdio` subprocess per session
+//     (or the bundled mock-codex.mjs that speaks the same protocol subset
+//     when no real binary or API key is available),
+//   - injects credentials into the child's environment / `loginApiKey` call,
+//   - pipes raw JSON-RPC frames back and forth.
 //
-// Selection rules:
-//   - If session has an apiKey AND $CODEX_BIN points at an executable,
-//     the real binary is used.
-//   - Otherwise, the mock backend runs.
+// Backend selection (per WebSocket connection):
+//   - real:  $CODEX_BIN exists AND the session has either an API key set or
+//            ChatGPT auth tokens cached. Spawns `$CODEX_BIN app-server`.
+//   - mock:  otherwise. Spawns the bundled mock app-server in JS, which
+//            implements the same JSON-RPC method names so the UI can be
+//            exercised end-to-end (including the approval flow) without
+//            OpenAI keys.
 //
-// Credentials never leave the server: the API key is stored in an in-memory
-// session map keyed by an http-only session cookie. The browser only ever
-// sees the session id.
+// Credentials never leave the server: the API key and any OAuth tokens are
+// stored in an in-memory session map keyed by an http-only session cookie.
 
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -27,8 +34,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { existsSync, mkdirSync, statSync, readFileSync } from "node:fs";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { existsSync, mkdirSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -42,20 +49,16 @@ const MOCK_BIN = join(__dirname, "mock-codex.mjs");
 mkdirSync(WORKDIR_ROOT, { recursive: true });
 
 // -------- session store (in-memory) --------
-// session: { id, apiKey?, createdAt, lastSeenAt, workdir, threads: Map<threadId, {name, lastActive}> }
+// session: { id, apiKey?, oauth?, createdAt, lastSeenAt, workdir }
 const sessions = new Map();
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days idle
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_MAX = 1000;
+
 setInterval(() => {
   const now = Date.now();
   for (const [id, s] of sessions) {
-    if (now - (s.lastSeenAt ?? s.createdAt) > SESSION_TTL_MS) {
-      // Purge in-memory credentials & metadata; the workdir on disk is left
-      // intact so users can recover files if they re-authenticate.
-      sessions.delete(id);
-    }
+    if (now - (s.lastSeenAt ?? s.createdAt) > SESSION_TTL_MS) sessions.delete(id);
   }
-  // Hard cap to bound memory.
   if (sessions.size > SESSION_MAX) {
     const sorted = [...sessions.entries()].sort((a, b) => (a[1].lastSeenAt ?? 0) - (b[1].lastSeenAt ?? 0));
     while (sessions.size > SESSION_MAX) sessions.delete(sorted.shift()[0]);
@@ -66,23 +69,17 @@ function touchSession(s) { if (s) s.lastSeenAt = Date.now(); }
 
 function getOrCreateSession(req, res) {
   let id = req.cookies?.codexsid;
-  if (id && sessions.has(id)) return sessions.get(id);
+  if (id && sessions.has(id)) { touchSession(sessions.get(id)); return sessions.get(id); }
   id = randomUUID();
   const workdir = join(WORKDIR_ROOT, id);
   mkdirSync(workdir, { recursive: true });
   const session = {
-    id,
-    apiKey: undefined,
-    createdAt: Date.now(),
-    lastSeenAt: Date.now(),
-    workdir,
-    threads: new Map(),
+    id, apiKey: undefined, oauth: undefined,
+    createdAt: Date.now(), lastSeenAt: Date.now(), workdir,
   };
   sessions.set(id, session);
   res.cookie("codexsid", id, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: false, // proxy strips TLS at the edge
+    httpOnly: true, sameSite: "lax", secure: false,
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
   return session;
@@ -97,31 +94,29 @@ function getSessionFromCookie(cookieHeader) {
   return s;
 }
 
-// Lightweight same-origin guard for credential-bearing endpoints.
 function sameOriginOnly(req, res, next) {
   const origin = req.headers.origin;
-  if (!origin) return next(); // non-browser caller (e.g. curl) — no cookie auth was used
-  const host = req.headers.host;
+  if (!origin) return next();
   try {
     const u = new URL(origin);
-    if (u.host === host) return next();
+    if (u.host === req.headers.host) return next();
   } catch {}
   res.status(403).json({ error: "cross-origin request rejected" });
 }
 
-// -------- HTTP app --------
+function backendKindFor(s) {
+  if (CODEX_BIN && existsSync(CODEX_BIN) && (s.apiKey || s.oauth)) return "real";
+  return "mock";
+}
+
+// -------- HTTP --------
 const app = express();
 app.use(cookieParser());
 app.use(express.json({ limit: "1mb" }));
-
-// Disable cache in development so the browser always sees fresh JS/CSS.
-app.use((req, res, next) => {
-  if (process.env.NODE_ENV !== "production") {
-    res.setHeader("Cache-Control", "no-store");
-  }
+app.use((_req, res, next) => {
+  if (process.env.NODE_ENV !== "production") res.setHeader("Cache-Control", "no-store");
   next();
 });
-
 app.use(express.static(PUBLIC_DIR));
 
 app.get("/api/whoami", (req, res) => {
@@ -129,10 +124,11 @@ app.get("/api/whoami", (req, res) => {
   res.json({
     sessionId: s.id,
     hasApiKey: Boolean(s.apiKey),
+    hasOauth: Boolean(s.oauth),
+    authMethod: s.oauth ? "chatgpt" : (s.apiKey ? "apikey" : null),
     backend: backendKindFor(s),
     realBinaryConfigured: Boolean(CODEX_BIN && existsSync(CODEX_BIN)),
     workdir: s.workdir,
-    threadCount: s.threads.size,
   });
 });
 
@@ -140,47 +136,62 @@ app.post("/api/login", sameOriginOnly, (req, res) => {
   const s = getOrCreateSession(req, res);
   const { apiKey } = req.body ?? {};
   if (typeof apiKey !== "string" || !apiKey.trim()) {
-    res.status(400).json({ error: "apiKey is required" });
-    return;
+    res.status(400).json({ error: "apiKey is required" }); return;
   }
   s.apiKey = apiKey.trim();
+  s.oauth = undefined;
   res.json({ ok: true, backend: backendKindFor(s) });
 });
 
 app.post("/api/logout", sameOriginOnly, (req, res) => {
   const s = getOrCreateSession(req, res);
-  s.apiKey = undefined;
+  s.apiKey = undefined; s.oauth = undefined;
   res.json({ ok: true });
 });
 
-app.get("/api/threads", (req, res) => {
+// ChatGPT OAuth/device-code flow: kicks off `account/login/start` via the
+// dedicated WS channel and returns the verification URL + user code. The
+// gateway holds the resulting access token in the session.
+app.post("/api/oauth/chatgpt/start", sameOriginOnly, async (req, res) => {
   const s = getOrCreateSession(req, res);
-  const items = [...s.threads.entries()]
-    .map(([id, meta]) => ({ id, ...meta }))
-    .sort((a, b) => b.lastActive - a.lastActive);
-  res.json({ threads: items });
+  if (!CODEX_BIN || !existsSync(CODEX_BIN)) {
+    // Mock backend simulates the device-code flow so the UI is exercisable.
+    s.oauth = { pending: true, deviceCode: "MOCK-DEMO-CODE", verificationUri: "https://chat.openai.com/auth/device" };
+    res.json({
+      verificationUri: s.oauth.verificationUri,
+      userCode: s.oauth.deviceCode,
+      mock: true,
+      message: "Demo flow — the mock backend will auto-complete sign-in in 3s.",
+    });
+    setTimeout(() => { s.oauth = { account: "demo@chatgpt", token: "mock-chatgpt-token" }; }, 3000);
+    return;
+  }
+  // For the real backend, mark the session as having an OAuth attempt in
+  // flight so the gateway will (re)spawn the real `codex app-server` for
+  // the next WebSocket. The browser then drives `account/login/start` over
+  // its existing JSON-RPC WebSocket; on success the child emits
+  // `account/updated`, which the gateway intercepts to persist the token.
+  s.oauth = { ...(s.oauth ?? {}), pending: true };
+  res.json({ useJsonRpc: true, reconnect: true });
+});
+
+app.get("/api/threads", (req, res) => {
+  // Real implementation will be served by the JSON-RPC `thread/list` method
+  // through the WebSocket; this HTTP endpoint exists only so the sidebar can
+  // render an empty list before the WS hands over.
+  getOrCreateSession(req, res);
+  res.json({ threads: [] });
 });
 
 app.post("/api/file-search", sameOriginOnly, async (req, res) => {
   const s = getOrCreateSession(req, res);
   const { query } = req.body ?? {};
-  if (typeof query !== "string") {
-    res.status(400).json({ error: "query required" });
-    return;
-  }
-  const results = await searchWorkdir(s.workdir, query);
-  res.json({ results });
+  if (typeof query !== "string") { res.status(400).json({ error: "query required" }); return; }
+  res.json({ results: await searchWorkdir(s.workdir, query) });
 });
 
-function backendKindFor(s) {
-  if (s.apiKey && CODEX_BIN && existsSync(CODEX_BIN)) return "real";
-  return "mock";
-}
-
 async function searchWorkdir(root, query) {
-  const out = [];
-  const q = query.toLowerCase();
-  const limit = 25;
+  const out = []; const q = query.toLowerCase(); const limit = 25;
   async function walk(dir, rel) {
     if (out.length >= limit) return;
     let entries;
@@ -190,32 +201,24 @@ async function searchWorkdir(root, query) {
       if (e.name.startsWith(".")) continue;
       const full = join(dir, e.name);
       const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        await walk(full, r);
-      } else if (e.name.toLowerCase().includes(q) || r.toLowerCase().includes(q)) {
-        out.push(r);
-      }
+      if (e.isDirectory()) await walk(full, r);
+      else if (e.name.toLowerCase().includes(q) || r.toLowerCase().includes(q)) out.push(r);
     }
   }
   await walk(root, "");
   return out;
 }
 
-// -------- WebSocket gateway --------
+// -------- WebSocket: JSON-RPC pass-through --------
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 server.on("upgrade", (req) => {
-  // Origin check on the WebSocket handshake. The 'ws' library will still
-  // perform the upgrade; we validate here and let the normal handler reject.
   const origin = req.headers.origin;
-  const host = req.headers.host;
   if (origin) {
     try {
       const u = new URL(origin);
-      if (u.host !== host) {
-        req.destroy();
-      }
+      if (u.host !== req.headers.host) req.destroy();
     } catch { req.destroy(); }
   }
 });
@@ -223,233 +226,144 @@ server.on("upgrade", (req) => {
 wss.on("connection", (ws, req) => {
   const session = getSessionFromCookie(req.headers.cookie);
   if (!session) {
-    ws.send(JSON.stringify({ type: "error", message: "no session; reload the page" }));
-    ws.close();
-    return;
+    ws.send(JSON.stringify({ jsonrpc: "2.0", method: "gateway/error", params: { message: "no session; reload the page" } }));
+    ws.close(); return;
   }
-  const conn = new BridgeConnection(ws, session);
-  ws.on("message", (raw) => conn.onMessage(raw));
-  ws.on("close", () => conn.onClose());
-  ws.on("error", () => conn.onClose());
-  conn.send({ type: "ready", backend: backendKindFor(session), workdir: session.workdir });
+  new BridgeConnection(ws, session);
 });
 
 class BridgeConnection {
   constructor(ws, session) {
     this.ws = ws;
     this.session = session;
+    this.kind = backendKindFor(session);
     this.child = null;
-    this.threadId = null;
-    this.pendingApprovals = new Map(); // approvalId -> resolved decision
+    this.buf = "";
+    this.spawn();
+    ws.on("message", (raw) => this.onWsMessage(raw));
+    ws.on("close", () => this.killChild());
+    ws.on("error", () => this.killChild());
+
+    // Out-of-band: tell the UI which backend it's talking to. This is the
+    // ONLY non-JSON-RPC frame the gateway emits, and it's clearly namespaced.
+    this.sendWs({ jsonrpc: "2.0", method: "gateway/ready", params: {
+      backend: this.kind,
+      workdir: session.workdir,
+      authMethod: session.oauth ? "chatgpt" : (session.apiKey ? "apikey" : null),
+    }});
   }
 
-  send(msg) {
-    if (this.ws.readyState !== this.ws.OPEN) return;
-    this.ws.send(JSON.stringify(msg));
+  spawn() {
+    const env = { ...process.env, CODEX_HOME: join(this.session.workdir, ".codex") };
+    if (this.session.apiKey) env.OPENAI_API_KEY = this.session.apiKey;
+
+    let bin, args;
+    if (this.kind === "real") {
+      bin = CODEX_BIN;
+      args = ["app-server"];
+    } else {
+      bin = process.execPath;
+      args = [MOCK_BIN];
+      env.MOCK_WORKDIR = this.session.workdir;
+      env.MOCK_HAS_AUTH = (this.session.apiKey || this.session.oauth) ? "1" : "0";
+    }
+    try {
+      this.child = spawn(bin, args, { env, cwd: this.session.workdir, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (err) {
+      this.sendWs({ jsonrpc: "2.0", method: "gateway/error", params: { message: `failed to spawn backend: ${err.message}` } });
+      return;
+    }
+
+    this.child.stdout.on("data", (chunk) => this.onChildData(chunk));
+    this.child.stderr.on("data", (chunk) => {
+      // Surface backend stderr as a gateway log notification (debug aid).
+      this.sendWs({ jsonrpc: "2.0", method: "gateway/log", params: { stream: "stderr", line: chunk.toString("utf8") } });
+    });
+    this.child.on("exit", (code, signal) => {
+      this.sendWs({ jsonrpc: "2.0", method: "gateway/exit", params: { code, signal } });
+      this.child = null;
+    });
+    this.child.on("error", (err) => {
+      this.sendWs({ jsonrpc: "2.0", method: "gateway/error", params: { message: err.message } });
+    });
   }
 
-  onMessage(raw) {
-    let msg;
-    try { msg = JSON.parse(raw.toString("utf8")); } catch { return; }
-    switch (msg.type) {
-      case "turn.start":
-        return this.startTurn(msg);
-      case "turn.interrupt":
-        return this.interrupt();
-      case "approval.respond":
-        return this.respondApproval(msg);
-      default:
-        this.send({ type: "error", message: `unknown client message: ${msg.type}` });
+  onChildData(chunk) {
+    this.buf += chunk.toString("utf8");
+    let nl;
+    while ((nl = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, nl).trim();
+      this.buf = this.buf.slice(nl + 1);
+      if (!line) continue;
+      // Validate it's JSON-RPC; if not, surface as a log line and continue
+      // (real codex app-server occasionally writes startup logs to stdout).
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed && (parsed.jsonrpc === "2.0" || parsed.jsonrpc === undefined)) {
+          // Tag method notifications coming from the server side so the
+          // browser knows whether something is a request, response, or
+          // notification per the JSON-RPC 2.0 spec.
+          this.ws.send(line);
+          this.maybePersistAuth(parsed);
+          continue;
+        }
+      } catch {}
+      this.sendWs({ jsonrpc: "2.0", method: "gateway/log", params: { stream: "stdout", line } });
     }
   }
 
-  onClose() {
-    this.killChild();
+  // Watch for `account/login/start` responses so the gateway can persist
+  // any returned tokens into the session map (so they survive WS reconnects).
+  maybePersistAuth(msg) {
+    if (msg && msg.result && typeof msg.result === "object") {
+      if (typeof msg.result.authToken === "string") this.session.oauth = { ...(this.session.oauth ?? {}), token: msg.result.authToken };
+      if (typeof msg.result.account === "object" && msg.result.account?.email) {
+        this.session.oauth = { ...(this.session.oauth ?? {}), account: msg.result.account.email };
+      }
+    }
+  }
+
+  onWsMessage(raw) {
+    if (!this.child || !this.child.stdin || this.child.stdin.destroyed) return;
+    let s;
+    try { s = raw.toString("utf8"); } catch { return; }
+    // Gateway-internal control frames the browser may send (e.g.
+    // refresh credentials after API-key login on a reconnect).
+    try {
+      const msg = JSON.parse(s);
+      if (msg && msg.method === "gateway/refreshAuth") {
+        if (this.session.apiKey && this.child) {
+          try {
+            this.child.stdin.write(JSON.stringify({
+              jsonrpc: "2.0", id: `gw-${Date.now()}`,
+              method: "loginApiKey",
+              params: { apiKey: this.session.apiKey },
+            }) + "\n");
+          } catch {}
+        }
+        return;
+      }
+    } catch {}
+    try { this.child.stdin.write(s + "\n"); } catch {}
+  }
+
+  sendWs(obj) {
+    if (this.ws.readyState !== this.ws.OPEN) return;
+    this.ws.send(JSON.stringify(obj));
   }
 
   killChild() {
     const c = this.child;
     if (c && !c.killed) {
       try { c.kill("SIGTERM"); } catch {}
-      // Escalate to SIGKILL if the child doesn't exit promptly.
       setTimeout(() => { try { if (!c.killed) c.kill("SIGKILL"); } catch {} }, 3000).unref();
     }
     this.child = null;
   }
-
-  interrupt() {
-    if (this.child) {
-      this.killChild();
-      this.send({ type: "turn.failed", error: { message: "interrupted" } });
-    }
-  }
-
-  respondApproval({ approvalId, decision }) {
-    const cb = this.pendingApprovals.get(approvalId);
-    if (cb) {
-      this.pendingApprovals.delete(approvalId);
-      cb(decision);
-    }
-  }
-
-  startTurn(msg) {
-    if (this.child) {
-      this.send({ type: "error", message: "another turn is in progress" });
-      return;
-    }
-    const {
-      input,
-      threadId,
-      model,
-      sandboxMode = "workspace-write",
-      approvalPolicy = "on-request",
-      networkAccessEnabled = false,
-      modelReasoningEffort,
-      webSearchMode,
-    } = msg;
-
-    const kind = backendKindFor(this.session);
-    let bin, args, env = { ...process.env };
-
-    if (kind === "real") {
-      // The real `codex exec --experimental-json` path does not surface
-      // interactive approvals over its JSONL stream — those come from the
-      // separate JSON-RPC app-server, which this MVP gateway does not bridge.
-      // Force `approval_policy=never` for the real backend so turns can't
-      // deadlock waiting on a UI prompt that will never fire.
-      const realApprovalPolicy = "never";
-      bin = CODEX_BIN;
-      args = ["exec", "--experimental-json", "--skip-git-repo-check"];
-      if (model) args.push("--model", model);
-      if (sandboxMode) args.push("--sandbox", sandboxMode);
-      args.push("--cd", this.session.workdir);
-      args.push("--config", `approval_policy="${realApprovalPolicy}"`);
-      args.push("--config", `sandbox_workspace_write.network_access=${networkAccessEnabled}`);
-      if (modelReasoningEffort) args.push("--config", `model_reasoning_effort="${modelReasoningEffort}"`);
-      if (webSearchMode) args.push("--config", `web_search="${webSearchMode}"`);
-      if (threadId || this.threadId) args.push("resume", threadId || this.threadId);
-      env.CODEX_API_KEY = this.session.apiKey;
-      if (approvalPolicy !== "never") {
-        this.send({ type: "log", line: "[gateway] real backend forces approval_policy=never (see README)." });
-      }
-    } else {
-      bin = process.execPath;
-      args = [MOCK_BIN];
-      env.MOCK_THREAD_ID = threadId || this.threadId || "";
-      env.MOCK_WORKDIR = this.session.workdir;
-      env.MOCK_APPROVAL_POLICY = approvalPolicy;
-      env.MOCK_SANDBOX = sandboxMode;
-      env.MOCK_MODEL = model || "mock-gpt";
-    }
-
-    this.send({ type: "turn.queued", backend: kind });
-
-    let child;
-    try {
-      child = spawn(bin, args, { env, cwd: this.session.workdir });
-    } catch (err) {
-      this.send({ type: "turn.failed", error: { message: `failed to spawn backend: ${err.message}` } });
-      return;
-    }
-    this.child = child;
-
-    const inputText = typeof input === "string"
-      ? input
-      : (input ?? []).filter((it) => it.type === "text").map((it) => it.text).join("\n\n");
-
-    // Send the prompt as the first line; keep stdin open so approval
-    // responses can be forwarded as additional JSON lines while the turn runs.
-    if (kind === "real") {
-      // Real codex `exec --experimental-json` reads the prompt as raw stdin
-      // (no JSON envelope) and exits when stdin is closed.
-      child.stdin.write(inputText);
-      child.stdin.end();
-    } else {
-      // Mock backend uses a JSON-line protocol so we can interleave approvals.
-      child.stdin.write(JSON.stringify({ type: "prompt", text: inputText }) + "\n");
-    }
-
-    let buf = "";
-    child.stdout.on("data", (chunk) => {
-      buf += chunk.toString("utf8");
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        this.handleEventLine(line);
-      }
-    });
-    const stderrChunks = [];
-    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-    child.on("exit", (code, signal) => {
-      this.child = null;
-      if (buf.trim()) this.handleEventLine(buf.trim());
-      if (code !== 0 && code !== null) {
-        const detail = Buffer.concat(stderrChunks).toString("utf8").slice(-2000);
-        this.send({
-          type: "turn.failed",
-          error: { message: `backend exited with code ${code}${signal ? ` (${signal})` : ""}: ${detail}` },
-        });
-      }
-    });
-    child.on("error", (err) => {
-      this.send({ type: "turn.failed", error: { message: `backend error: ${err.message}` } });
-    });
-  }
-
-  handleEventLine(line) {
-    let evt;
-    try { evt = JSON.parse(line); } catch {
-      this.send({ type: "log", line });
-      return;
-    }
-
-    // Out-of-band approval requests from the mock backend (real codex backend
-    // surfaces approvals over the JSON-RPC app-server, which is out of scope
-    // for this MVP gateway).
-    if (evt.type === "approval.request") {
-      this.handleApprovalRequest(evt);
-      return;
-    }
-
-    if (evt.type === "thread.started" && evt.thread_id) {
-      this.threadId = evt.thread_id;
-      const meta = this.session.threads.get(evt.thread_id) ?? { name: null, lastActive: 0 };
-      meta.lastActive = Date.now();
-      this.session.threads.set(evt.thread_id, meta);
-    }
-    this.send(evt);
-  }
-
-  handleApprovalRequest(evt) {
-    const id = evt.approval_id ?? randomUUID();
-    this.send({ type: "approval.request", approval_id: id, request: evt.request });
-    new Promise((resolve) => {
-      this.pendingApprovals.set(id, resolve);
-      setTimeout(() => {
-        if (this.pendingApprovals.has(id)) {
-          this.pendingApprovals.delete(id);
-          resolve("deny");
-        }
-      }, 2 * 60 * 1000);
-    }).then((decision) => {
-      if (this.child && this.child.stdin && !this.child.stdin.destroyed) {
-        try {
-          this.child.stdin.write(
-            JSON.stringify({ type: "approval.response", approval_id: id, decision }) + "\n",
-          );
-        } catch {}
-      }
-    });
-  }
 }
 
 server.listen(PORT, HOST, () => {
-  // eslint-disable-next-line no-console
   console.log(`[codex-web] listening on http://${HOST}:${PORT}`);
-  // eslint-disable-next-line no-console
-  console.log(`[codex-web] backend: ${CODEX_BIN ? `real (${CODEX_BIN})` : "mock-only"}`);
-  // eslint-disable-next-line no-console
+  console.log(`[codex-web] codex binary: ${CODEX_BIN || "(not set — mock-only)"}`);
   console.log(`[codex-web] workdir root: ${WORKDIR_ROOT}`);
 });

@@ -1,6 +1,7 @@
 // Codex Web — browser front-end.
-// Talks to the gateway over /ws using the Codex JSONL event protocol
-// (mirrors codex exec --experimental-json + a small approval extension).
+// Talks to the gateway over /ws using `app-server-protocol` JSON-RPC 2.0
+// (the same protocol the Rust `codex app-server` speaks). Every frame on
+// the wire is a JSON-RPC envelope. The gateway is a transparent proxy.
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -13,6 +14,10 @@ const state = {
   threads: [],
   activeThreadId: null,
   inFlight: false,
+  initialized: false,
+  // pending JSON-RPC requests sent by the browser, awaiting server response
+  pending: new Map(), // requestId -> { resolve, reject, method }
+  nextReqId: 1,
   // current turn's items keyed by id, in order
   itemsById: new Map(),
   itemOrder: [],
@@ -39,6 +44,7 @@ const state = {
     { name: "/login", desc: "Sign in with an OpenAI API key" },
     { name: "/logout", desc: "Sign out and clear the API key" },
     { name: "/clear", desc: "Clear the current transcript" },
+    { name: "/mcp", desc: "Manage MCP servers" },
     { name: "/help", desc: "Show available commands" },
   ],
 };
@@ -76,11 +82,12 @@ function renderAccount() {
   const w = state.whoami;
   const status = $("#account-status");
   const btn = $("#account-btn");
-  if (!w) {
-    status.textContent = "—";
-    return;
-  }
-  if (w.hasApiKey) {
+  if (!w) { status.textContent = "—"; return; }
+  if (w.hasOauth) {
+    status.textContent = `ChatGPT: ${w.account?.email ?? w.account ?? "signed in"}`;
+    status.classList.remove("muted");
+    btn.textContent = "Sign out";
+  } else if (w.hasApiKey) {
     status.textContent = "API key set";
     status.classList.remove("muted");
     btn.textContent = "Sign out";
@@ -127,81 +134,196 @@ function newThread() {
   renderThreads();
 }
 
-// ---------- WebSocket ----------
+// ---------- WebSocket / JSON-RPC client ----------
 function connectWs() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
   state.ws = ws;
-  ws.addEventListener("open", () => {
-    state.reconnectAttempts = 0;
-  });
+  ws.addEventListener("open", () => { state.reconnectAttempts = 0; });
   ws.addEventListener("message", (e) => {
-    try { handleEvent(JSON.parse(e.data)); }
-    catch (err) { console.error("bad event", err, e.data); }
+    try { onJsonRpc(JSON.parse(e.data)); }
+    catch (err) { console.error("bad rpc frame", err, e.data); }
   });
   ws.addEventListener("close", () => {
-    state.ws = null;
-    setInFlight(false);
+    state.ws = null; state.initialized = false; setInFlight(false);
     appendSystem("Disconnected. Reconnecting…");
     setTimeout(connectWs, Math.min(5000, 500 * 2 ** state.reconnectAttempts++));
   });
   ws.addEventListener("error", () => ws.close());
 }
-function send(msg) {
+
+function rpcRaw(obj) {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify(msg));
+    state.ws.send(JSON.stringify(obj));
   }
 }
 
-// ---------- event handling ----------
-function handleEvent(evt) {
-  switch (evt.type) {
-    case "ready":
-      state.whoami = { ...(state.whoami ?? {}), backend: evt.backend, workdir: evt.workdir };
+function rpcNotify(method, params) {
+  rpcRaw({ jsonrpc: "2.0", method, params });
+}
+
+function rpcCall(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = `c${state.nextReqId++}`;
+    state.pending.set(id, { resolve, reject, method });
+    rpcRaw({ jsonrpc: "2.0", id, method, params });
+    setTimeout(() => {
+      if (state.pending.has(id)) {
+        state.pending.delete(id);
+        reject(new Error(`rpc timeout: ${method}`));
+      }
+    }, 60_000);
+  });
+}
+
+// Reply to a server-initiated JSON-RPC request (e.g. an approval prompt).
+function rpcReply(id, result) {
+  rpcRaw({ jsonrpc: "2.0", id, result });
+}
+
+// Route an incoming JSON-RPC frame (notification, response, or
+// server-initiated request) into the existing UI event pipeline.
+function onJsonRpc(msg) {
+  if (!msg || typeof msg !== "object") return;
+
+  // Response to a browser-issued request
+  if (msg.id !== undefined && msg.method === undefined) {
+    const pending = state.pending.get(String(msg.id));
+    if (pending) {
+      state.pending.delete(String(msg.id));
+      if (msg.error) pending.reject(new Error(msg.error.message));
+      else pending.resolve(msg.result);
+    }
+    return;
+  }
+
+  // Server-initiated request expecting a reply (approvals, MCP elicitations)
+  if (msg.id !== undefined && msg.method !== undefined) {
+    onServerRequest(msg);
+    return;
+  }
+
+  // Notification
+  onNotification(msg.method, msg.params ?? {});
+}
+
+function onServerRequest(msg) {
+  switch (msg.method) {
+    case "item/commandExecution/requestApproval":
+      renderApproval({
+        request: {
+          kind: "exec",
+          command: Array.isArray(msg.params?.command) ? msg.params.command.join(" ") : msg.params?.command,
+          cwd: msg.params?.cwd, reason: msg.params?.reason,
+        },
+        onDecision: (decision) => rpcReply(msg.id, { decision: mapDecision(decision) }),
+      });
+      return;
+    case "item/fileChange/requestApproval": {
+      const fc = msg.params?.file_changes ?? msg.params?.fileChanges ?? {};
+      const files = Object.entries(fc).map(([path, v]) => ({ path, kind: v?.kind ?? "modify", diff: v?.diff }));
+      renderApproval({
+        request: { kind: "apply_patch", summary: `${files.length} file(s)`, files },
+        onDecision: (decision) => rpcReply(msg.id, { decision: mapDecision(decision) }),
+      });
+      return;
+    }
+    default:
+      // Unknown server request — reject so it doesn't deadlock.
+      rpcRaw({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `unsupported server method: ${msg.method}` } });
+  }
+}
+
+function mapDecision(uiDecision) {
+  // UI uses approve / approve-session / deny ; protocol uses approved / approved_for_session / denied
+  if (uiDecision === "approve") return "approved";
+  if (uiDecision === "approve-session") return "approved_for_session";
+  return "denied";
+}
+
+// Translate JSON-RPC notification methods into the existing event shape used
+// by handleEvent / upsertItem / renderItem so the rendering layer stays put.
+function onNotification(method, params) {
+  switch (method) {
+    case "gateway/ready":
+      state.whoami = { ...(state.whoami ?? {}), backend: params.backend, workdir: params.workdir, authMethod: params.authMethod };
       updateStatusBar();
+      // Send `initialize` once per WS connection to begin a JSON-RPC session.
+      if (!state.initialized) initializeRpcSession();
+      window.dispatchEvent(new CustomEvent("codex:ready"));
       return;
-    case "turn.queued":
-      setInFlight(true);
+    case "gateway/log":
+      console.log("[backend]", params.stream, params.line);
       return;
-    case "thread.started":
-      state.activeThreadId = evt.thread_id;
-      $("#thread-title").textContent = evt.thread_id;
-      refreshThreads();
+    case "gateway/exit":
+      appendSystem(`Backend exited (code=${params.code ?? "?"})`, "error");
       return;
-    case "turn.started":
-      // already in_flight, nothing else to do
+    case "gateway/error":
+      appendSystem(`✗ ${params.message}`, "error");
       return;
-    case "item.started":
-    case "item.updated":
-      upsertItem(evt.item, evt.type === "item.started");
+
+    case "thread/started":
+      state.activeThreadId = params.conversationId;
+      $("#thread-title").textContent = params.conversationId;
       return;
-    case "item.completed":
-      upsertItem(evt.item, false, true);
+    case "turn/started":
+      // already in_flight
       return;
-    case "turn.completed":
+    case "turn/completed":
       setInFlight(false);
-      if (evt.usage) {
-        appendSystem(`Turn complete · ${evt.usage.input_tokens} in / ${evt.usage.output_tokens} out tokens`);
+      if (params.usage) {
+        appendSystem(`Turn complete · ${params.usage.input_tokens} in / ${params.usage.output_tokens} out tokens`);
       }
       return;
-    case "turn.failed":
+    case "turn/failed":
       setInFlight(false);
-      appendSystem(`✗ ${evt.error?.message ?? "turn failed"}`, "error");
+      appendSystem(`✗ ${params.error?.message ?? "turn failed"}`, "error");
       return;
-    case "approval.request":
-      renderApproval(evt);
+
+    case "item/started":
+      upsertItem(params.item, true, false);
       return;
-    case "error":
-      appendSystem(`✗ ${evt.message}`, "error");
+    case "item/agentMessage/delta": {
+      const existing = state.itemsById.get(params.itemId);
+      const text = (existing?.item?.text ?? "") + (params.delta ?? "");
+      upsertItem({ id: params.itemId, type: "agent_message", text, status: "in_progress" }, !existing, false);
       return;
-    case "log":
-      console.log("[backend]", evt.line);
+    }
+    case "item/completed":
+      upsertItem(params.item, false, true);
       return;
+
+    case "account/updated":
+      state.whoami = { ...(state.whoami ?? {}), authMethod: params.authMethod, account: params.account, hasOauth: true };
+      renderAccount();
+      updateStatusBar();
+      appendSystem(`Signed in as ${params.account?.email ?? "ChatGPT user"}`);
+      window.dispatchEvent(new CustomEvent("codex:signedIn"));
+      return;
+
+    case "mcpServer/startupStatus/updated":
+      // Re-render MCP modal if open
+      if (typeof window.__mcpRefresh === "function") window.__mcpRefresh();
+      return;
+
     default:
-      console.warn("unknown event", evt);
+      console.debug("unhandled notification", method, params);
   }
 }
 
+async function initializeRpcSession() {
+  try {
+    await rpcCall("initialize", {
+      clientInfo: { name: "codex-web", title: "Codex Web", version: "0.1.0" },
+      capabilities: { experimentalApi: false },
+    });
+    state.initialized = true;
+  } catch (e) {
+    console.error("initialize failed", e);
+  }
+}
+
+// ---------- transcript item upsert ----------
 function upsertItem(item, isStart, isComplete = false) {
   const transcript = $("#transcript");
   let entry = state.itemsById.get(item.id);
@@ -381,10 +503,11 @@ function renderUnknown(item) {
 }
 
 // ---------- approval modal (inline in transcript) ----------
-function renderApproval(evt) {
+// Driven by server-initiated JSON-RPC requests. `onDecision` is invoked with
+// "approve" | "approve-session" | "deny" and is responsible for replying.
+function renderApproval({ request: r, onDecision }) {
   const transcript = $("#transcript");
-  const card = el("div", { class: "approval-card", "data-approval-id": evt.approval_id });
-  const r = evt.request ?? {};
+  const card = el("div", { class: "approval-card" });
   const head = r.kind === "apply_patch" ? "Apply patch?" : r.kind === "exec" ? "Run command?" : "Approval requested";
   let body;
   if (r.kind === "exec") {
@@ -408,7 +531,7 @@ function renderApproval(evt) {
   card.addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-decision]");
     if (!btn) return;
-    send({ type: "approval.respond", approvalId: evt.approval_id, decision: btn.dataset.decision });
+    onDecision(btn.dataset.decision);
     card.querySelectorAll("button").forEach((b) => (b.disabled = true));
     card.querySelector(".ap-head").textContent = `→ ${btn.dataset.decision}`;
   });
@@ -421,7 +544,7 @@ let acState = { kind: null, items: [], selected: 0, anchorStart: 0 };
 
 function bindUi() {
   $("#composer").addEventListener("submit", onSubmit);
-  $("#cancel-btn").addEventListener("click", () => send({ type: "turn.interrupt" }));
+  $("#cancel-btn").addEventListener("click", interruptTurn);
   $("#new-thread").addEventListener("click", newThread);
   $("#account-btn").addEventListener("click", onAccountClick);
   $("#settings-btn").addEventListener("click", openSettings);
@@ -523,7 +646,7 @@ function onKeyDown(e) {
     $("#composer").requestSubmit();
   } else if (e.key === "Escape" && state.inFlight) {
     e.preventDefault();
-    send({ type: "turn.interrupt" });
+    interruptTurn();
   }
 }
 
@@ -544,18 +667,38 @@ function onSubmit(e) {
     return;
   }
   appendUser(text);
-  send({
-    type: "turn.start",
-    input: [{ type: "text", text }],
-    threadId: state.activeThreadId,
-    model: state.settings.model,
-    sandboxMode: state.settings.sandboxMode,
-    approvalPolicy: state.settings.approvalPolicy,
-    networkAccessEnabled: state.settings.networkAccessEnabled,
-    modelReasoningEffort: state.settings.modelReasoningEffort,
-    webSearchMode: state.settings.webSearchMode,
-  });
+  startTurn(text);
   t.value = ""; autoGrowReset(t);
+}
+
+async function startTurn(text) {
+  setInFlight(true);
+  try {
+    let conversationId = state.activeThreadId;
+    if (!conversationId) {
+      const r = await rpcCall("thread/start", {
+        cwd: state.whoami?.workdir,
+        model: state.settings.model,
+        sandboxMode: state.settings.sandboxMode,
+        approvalPolicy: state.settings.approvalPolicy,
+        modelReasoningEffort: state.settings.modelReasoningEffort,
+      });
+      conversationId = r?.conversationId ?? null;
+      if (conversationId) state.activeThreadId = conversationId;
+    }
+    await rpcCall("turn/start", {
+      conversationId,
+      input: [{ type: "text", text }],
+    });
+  } catch (e) {
+    setInFlight(false);
+    appendSystem(`✗ ${e.message}`, "error");
+  }
+}
+
+async function interruptTurn() {
+  if (!state.activeThreadId) return;
+  try { await rpcCall("turn/interrupt", { conversationId: state.activeThreadId }); } catch {}
 }
 
 function autoGrowReset(t) { t.style.height = "auto"; }
@@ -614,6 +757,7 @@ function handleSlash(text) {
     }
     case "/login": openLogin(); return;
     case "/logout": doLogout(); return;
+    case "/mcp": openMcpModal(); return;
     case "/model":
       if (arg) { state.settings.model = arg; save("settings", state.settings); updateStatusBar(); appendSystem(`model → ${arg}`); }
       else openSettings("model");
@@ -672,22 +816,66 @@ function modal(html, onMount) {
 }
 function closeModal() { $("#modal-root").innerHTML = ""; }
 
+function waitForReady(timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN && state.initialized) return resolve();
+    const t = setTimeout(() => { window.removeEventListener("codex:ready", on); resolve(); }, timeoutMs);
+    function on() { clearTimeout(t); window.removeEventListener("codex:ready", on); resolve(); }
+    window.addEventListener("codex:ready", on);
+  });
+}
+
 function onAccountClick() {
-  if (state.whoami?.hasApiKey) doLogout();
+  if (state.whoami?.hasApiKey || state.whoami?.hasOauth) doLogout();
   else openLogin();
 }
 
 function openLogin() {
   modal(`
     <h2>Sign in to Codex</h2>
-    <p>Paste an OpenAI API key. It is stored only on the server, tied to your session cookie. The browser never sees it again.</p>
+    <p>Choose a sign-in method. Credentials are stored only on the server, tied to your session cookie.</p>
+    <div class="modal-row">
+      <button id="chatgpt" class="primary" style="width:100%">Sign in with ChatGPT</button>
+    </div>
+    <div class="modal-row" style="opacity:.6;text-align:center;font-size:12px">— or —</div>
     <div class="modal-row"><label>OpenAI API key</label><input id="apikey" type="password" placeholder="sk-…" autofocus /></div>
     <div class="modal-actions">
       <button id="cancel" class="ghost">Cancel</button>
-      <button id="save" class="primary">Sign in</button>
+      <button id="save" class="primary">Use API key</button>
     </div>
+    <div id="oauth-status" class="muted" style="font-size:12px;margin-top:8px"></div>
   `, (m) => {
     m.querySelector("#cancel").addEventListener("click", closeModal);
+    m.querySelector("#chatgpt").addEventListener("click", async () => {
+      const status = m.querySelector("#oauth-status");
+      status.textContent = "Starting ChatGPT sign-in…";
+      try {
+        // Ask the gateway to seed the OAuth session, then drive the
+        // canonical app-server-protocol method `account/login/start`.
+        const seed = await fetch("/api/oauth/chatgpt/start", { method: "POST" }).then((r) => r.json());
+        // If the gateway needs to (re)spawn the real app-server for the
+        // OAuth-pending session, reconnect the WS first so subsequent
+        // JSON-RPC calls land on the real child.
+        if (seed?.reconnect && state.ws) {
+          await new Promise((resolve) => {
+            const ws = state.ws;
+            ws.addEventListener("close", () => resolve(), { once: true });
+            ws.close();
+          });
+          await waitForReady();
+        }
+        const r = await rpcCall("account/login/start", { method: "chatgpt" });
+        const verificationUri = r?.verificationUri ?? seed.verificationUri;
+        const userCode = r?.userCode ?? seed.userCode;
+        status.innerHTML = `Open <a href="${escapeHtml(verificationUri)}" target="_blank" rel="noopener">${escapeHtml(verificationUri)}</a> and enter code <code>${escapeHtml(userCode)}</code>.`;
+        // The mock backend resolves the OAuth flow via an `account/updated`
+        // notification; that handler closes the modal.
+        const onSignedIn = () => { closeModal(); window.removeEventListener("codex:signedIn", onSignedIn); };
+        window.addEventListener("codex:signedIn", onSignedIn);
+      } catch (e) {
+        status.textContent = `OAuth failed: ${e.message}`;
+      }
+    });
     m.querySelector("#save").addEventListener("click", async () => {
       const key = m.querySelector("#apikey").value.trim();
       if (!key) return;
@@ -698,12 +886,74 @@ function openLogin() {
       if (r.ok) {
         await refreshWhoAmI();
         updateStatusBar();
-        appendSystem("Signed in.");
+        appendSystem("Signed in with API key.");
         closeModal();
+        // Reconnect WS so the new auth is in the child env.
+        if (state.ws) state.ws.close();
       } else {
         const data = await r.json().catch(() => ({}));
         appendSystem(`Login failed: ${data.error ?? r.status}`, "error");
       }
+    });
+  });
+}
+
+async function openMcpModal() {
+  modal(`
+    <h2>MCP servers</h2>
+    <p>Servers configured via <code>~/.codex/config.toml</code> (and added here for this session).</p>
+    <div id="mcp-list"><div class="muted">Loading…</div></div>
+    <div class="modal-row" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+      <label>Add a new server</label>
+      <input id="mcp-name" placeholder="server name" />
+      <input id="mcp-cmd" placeholder="command (e.g. npx -y @modelcontextprotocol/server-filesystem /tmp)" style="margin-top:6px" />
+    </div>
+    <div class="modal-actions">
+      <button id="add" class="primary">Add</button>
+      <button id="reload">Reload</button>
+      <button id="close" class="ghost">Close</button>
+    </div>
+  `, async (m) => {
+    const refresh = async () => {
+      try {
+        const r = await rpcCall("mcpServerStatus/list", {});
+        const list = m.querySelector("#mcp-list");
+        const servers = r?.servers ?? [];
+        if (servers.length === 0) {
+          list.innerHTML = `<div class="muted">No MCP servers configured.</div>`;
+        } else {
+          list.innerHTML = servers.map((s) => `
+            <div class="tool-card" style="margin-bottom:8px">
+              <div class="tc-head">
+                <span class="status-dot ${s.status === "connected" ? "completed" : "failed"}"></span>
+                <strong>${escapeHtml(s.name)}</strong>
+                <span class="muted">${escapeHtml(s.status ?? "?")}</span>
+              </div>
+              ${s.tools ? `<div class="tc-meta">tools: ${escapeHtml((s.tools ?? []).join(", "))}</div>` : ""}
+            </div>
+          `).join("");
+        }
+      } catch (e) {
+        m.querySelector("#mcp-list").innerHTML = `<div class="muted">Error: ${escapeHtml(e.message)}</div>`;
+      }
+    };
+    window.__mcpRefresh = refresh;
+    await refresh();
+    m.querySelector("#close").addEventListener("click", () => { window.__mcpRefresh = null; closeModal(); });
+    m.querySelector("#reload").addEventListener("click", async () => {
+      await rpcCall("config/mcpServer/reload", {}).catch(() => {});
+      await refresh();
+    });
+    m.querySelector("#add").addEventListener("click", async () => {
+      const name = m.querySelector("#mcp-name").value.trim();
+      const cmd  = m.querySelector("#mcp-cmd").value.trim();
+      if (!name || !cmd) return;
+      await rpcCall("config/value/write", {
+        path: ["mcp_servers", name],
+        value: { command: cmd.split(" ")[0], args: cmd.split(" ").slice(1) },
+      }).catch(() => {});
+      await rpcCall("config/mcpServer/reload", {}).catch(() => {});
+      await refresh();
     });
   });
 }
