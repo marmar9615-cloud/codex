@@ -13,6 +13,7 @@ const state = {
   whoami: null,
   threads: [],
   activeThreadId: null,
+  activeTurnId: null,
   inFlight: false,
   initialized: false,
   // pending JSON-RPC requests sent by the browser, awaiting server response
@@ -119,13 +120,15 @@ function renderThreads() {
 
 async function openThread(id) {
   state.activeThreadId = id;
+  state.activeTurnId = null;
   $("#thread-title").textContent = id;
   $("#transcript").innerHTML = "";
   state.itemsById.clear();
   state.itemOrder = [];
   renderThreads();
   try {
-    await rpcCall("thread/resume", { conversationId: id });
+    // Canonical v2 ThreadResumeParams: { threadId, persistExtendedHistory }.
+    await rpcCall("thread/resume", { threadId: id, persistExtendedHistory: false });
     appendSystem(`Resumed thread ${id}.`);
   } catch (e) {
     appendSystem(`Could not resume ${id}: ${e.message}`, "error");
@@ -133,10 +136,15 @@ async function openThread(id) {
 }
 
 function newThread() {
-  if (state.activeThreadId) {
-    rpcCall("thread/interrupt", { conversationId: state.activeThreadId }).catch(() => {});
+  // Best-effort interrupt of an in-flight turn before discarding the thread.
+  if (state.activeThreadId && state.activeTurnId) {
+    rpcCall("turn/interrupt", {
+      threadId: state.activeThreadId,
+      turnId: state.activeTurnId,
+    }).catch(() => {});
   }
   state.activeThreadId = null;
+  state.activeTurnId = null;
   $("#thread-title").textContent = "New conversation";
   $("#transcript").innerHTML = "";
   state.itemsById.clear();
@@ -157,8 +165,12 @@ function connectWs() {
     // If we had an active thread when the socket dropped, transparently
     // resume it via the canonical `thread/resume` request.
     if (state.activeThreadId) {
-      try { await rpcCall("thread/resume", { conversationId: state.activeThreadId }); }
-      catch (e) { console.warn("thread/resume failed", e.message); }
+      try {
+        await rpcCall("thread/resume", {
+          threadId: state.activeThreadId,
+          persistExtendedHistory: false,
+        });
+      } catch (e) { console.warn("thread/resume failed", e.message); }
     }
     // Push current client settings to the backend via canonical
     // `config/value/write` so they are applied for subsequent turns.
@@ -181,6 +193,8 @@ function connectWs() {
 async function pushSettingsToBackend() {
   if (!state.initialized) return;
   const s = state.settings;
+  // Canonical v2 ConfigValueWriteParams: { keyPath, value, mergeStrategy }.
+  // keyPath is a single dotted string per the schema.
   const writes = [
     ["model", s.model],
     ["model_reasoning_effort", s.modelReasoningEffort],
@@ -188,8 +202,9 @@ async function pushSettingsToBackend() {
     ["sandbox_mode", s.sandboxMode],
     ["tools.web_search", s.webSearchMode !== "disabled"],
   ];
-  await Promise.all(writes.map(([key, value]) =>
-    rpcCall("config/value/write", { path: key.split("."), value }).catch(() => {})
+  await Promise.all(writes.map(([keyPath, value]) =>
+    rpcCall("config/value/write", { keyPath, value, mergeStrategy: "replace" })
+      .catch(() => {})
   ));
 }
 
@@ -250,36 +265,50 @@ function onJsonRpc(msg) {
 
 function onServerRequest(msg) {
   switch (msg.method) {
-    case "item/commandExecution/requestApproval":
+    case "item/commandExecution/requestApproval": {
+      const p = msg.params ?? {};
+      // v2 CommandExecutionRequestApprovalParams.command is a string.
+      const command = typeof p.command === "string"
+        ? p.command
+        : Array.isArray(p.command) ? p.command.join(" ") : "";
       renderApproval({
-        request: {
-          kind: "exec",
-          command: Array.isArray(msg.params?.command) ? msg.params.command.join(" ") : msg.params?.command,
-          cwd: msg.params?.cwd, reason: msg.params?.reason,
-        },
+        request: { kind: "exec", command, cwd: p.cwd, reason: p.reason },
         onDecision: (decision) => rpcReply(msg.id, { decision: mapDecision(decision) }),
       });
       return;
+    }
     case "item/fileChange/requestApproval": {
-      const fc = msg.params?.file_changes ?? msg.params?.fileChanges ?? {};
-      const files = Object.entries(fc).map(([path, v]) => ({ path, kind: v?.kind ?? "modify", diff: v?.diff }));
+      const p = msg.params ?? {};
+      // v2 FileChangeRequestApprovalParams carries only metadata; the real
+      // file diff lives in the matching item/started notification.
+      const item = state.itemsById.get(p.itemId)?.item;
+      const files = (item?.changes ?? []).map((c) => ({
+        path: c.path, kind: patchKind(c.kind), diff: c.diff,
+      }));
       renderApproval({
-        request: { kind: "apply_patch", summary: `${files.length} file(s)`, files },
+        request: {
+          kind: "apply_patch",
+          summary: files.length ? `${files.length} file(s)` : (p.reason ?? "patch"),
+          files,
+        },
         onDecision: (decision) => rpcReply(msg.id, { decision: mapDecision(decision) }),
       });
       return;
     }
     default:
       // Unknown server request — reject so it doesn't deadlock.
-      rpcRaw({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `unsupported server method: ${msg.method}` } });
+      rpcRaw({ jsonrpc: "2.0", id: msg.id,
+               error: { code: -32601, message: `unsupported server method: ${msg.method}` } });
   }
 }
 
+// Map UI decisions to the canonical v2 approval decision enums.
+// CommandExecutionApprovalDecision: "accept" | "acceptForSession" | "decline" | "cancel" | …
+// FileChangeApprovalDecision:        "accept" | "acceptForSession" | "decline" | "cancel"
 function mapDecision(uiDecision) {
-  // UI uses approve / approve-session / deny ; protocol uses approved / approved_for_session / denied
-  if (uiDecision === "approve") return "approved";
-  if (uiDecision === "approve-session") return "approved_for_session";
-  return "denied";
+  if (uiDecision === "approve") return "accept";
+  if (uiDecision === "approve-session") return "acceptForSession";
+  return "decline";
 }
 
 // Translate JSON-RPC notification methods into the existing event shape used
@@ -287,47 +316,82 @@ function mapDecision(uiDecision) {
 function onNotification(method, params) {
   switch (method) {
     case "thread/started":
-      state.activeThreadId = params.conversationId;
-      $("#thread-title").textContent = params.conversationId;
+      // v2 ThreadStartedNotification: { thread: Thread }
+      state.activeThreadId = params.thread?.id ?? state.activeThreadId;
+      $("#thread-title").textContent = params.thread?.name ?? params.thread?.id ?? "thread";
       refreshThreads();
       return;
     case "turn/started":
-      // already in_flight
+      // v2 TurnStartedNotification: { threadId, turn }
+      state.activeTurnId = params.turn?.id ?? null;
       return;
-    case "turn/completed":
+    case "turn/completed": {
+      // v2 TurnCompletedNotification: { threadId, turn }
+      state.activeTurnId = null;
       setInFlight(false);
-      if (params.usage) {
-        appendSystem(`Turn complete · ${params.usage.input_tokens} in / ${params.usage.output_tokens} out tokens`);
-      }
+      const ms = params.turn?.durationMs;
+      appendSystem(`Turn complete${ms != null ? ` · ${ms} ms` : ""}`);
       return;
+    }
     case "turn/failed":
+      // Older notification kept for compatibility.
+      state.activeTurnId = null;
       setInFlight(false);
       appendSystem(`✗ ${params.error?.message ?? "turn failed"}`, "error");
       return;
 
     case "item/started":
+      // v2 ItemStartedNotification: { item, threadId, turnId }
       upsertItem(params.item, true, false);
       return;
     case "item/agentMessage/delta": {
+      // v2 AgentMessageDeltaNotification: { threadId, turnId, itemId, delta }
       const existing = state.itemsById.get(params.itemId);
       const text = (existing?.item?.text ?? "") + (params.delta ?? "");
-      upsertItem({ id: params.itemId, type: "agent_message", text, status: "in_progress" }, !existing, false);
+      upsertItem(
+        { id: params.itemId, type: "agentMessage", text, phase: null, memoryCitation: null },
+        !existing, false,
+      );
       return;
     }
     case "item/completed":
       upsertItem(params.item, false, true);
       return;
+    case "thread/compacted":
+      appendSystem("History compacted.");
+      return;
 
-    case "account/updated":
-      state.whoami = { ...(state.whoami ?? {}), authMethod: params.authMethod, account: params.account, hasOauth: true };
+    case "account/updated": {
+      // v2 AccountUpdatedNotification: { authMode, planType }
+      const authMode = params.authMode ?? null;
+      const planType = params.planType ?? null;
+      const hasOauth = authMode === "chatgpt" || authMode === "chatgptAuthTokens";
+      const hasApiKey = authMode === "apikey";
+      state.whoami = {
+        ...(state.whoami ?? {}),
+        authMethod: authMode,
+        account: hasOauth ? `chatgpt${planType ? ` (${planType})` : ""}` : null,
+        hasOauth, hasApiKey: state.whoami?.hasApiKey || hasApiKey,
+      };
       renderAccount();
       updateStatusBar();
-      appendSystem(`Signed in as ${params.account?.email ?? "ChatGPT user"}`);
-      window.dispatchEvent(new CustomEvent("codex:signedIn"));
+      if (hasOauth) {
+        appendSystem(`Signed in with ChatGPT${planType ? ` (${planType})` : ""}`);
+        window.dispatchEvent(new CustomEvent("codex:signedIn"));
+      } else if (hasApiKey) {
+        appendSystem("API key login confirmed by backend.");
+      } else if (authMode === null) {
+        appendSystem("Signed out by backend.");
+      }
+      return;
+    }
+    case "account/login/completed":
+      if (params?.success === false) {
+        appendSystem(`Login failed: ${params.error ?? "unknown error"}`, "error");
+      }
       return;
 
     case "mcpServer/startupStatus/updated":
-      // Re-render MCP modal if open
       if (typeof window.__mcpRefresh === "function") window.__mcpRefresh();
       return;
 
@@ -367,15 +431,15 @@ function upsertItem(item, isStart, isComplete = false) {
 }
 
 function renderItem(item, isComplete) {
+  // v2 ThreadItem `type` discriminator. See
+  // codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.ts.
   switch (item.type) {
-    case "agent_message": return renderAgentMessage(item);
+    case "agentMessage": return renderAgentMessage(item);
     case "reasoning": return renderReasoning(item);
-    case "command_execution": return renderCommandExec(item);
-    case "file_change": return renderFileChange(item);
-    case "mcp_tool_call": return renderMcp(item);
-    case "web_search": return renderWebSearch(item);
-    case "todo_list": return renderTodoList(item);
-    case "error": return renderErrorItem(item);
+    case "commandExecution": return renderCommandExec(item);
+    case "fileChange": return renderFileChange(item);
+    case "mcpToolCall": return renderMcp(item);
+    case "plan": return renderPlan(item);
     default: return renderUnknown(item);
   }
 }
@@ -397,42 +461,56 @@ function renderReasoning(item) {
 }
 
 function renderCommandExec(item) {
+  // v2 commandExecution: { command, status: "inProgress"|"completed"|"failed"|"declined",
+  //                         aggregatedOutput, exitCode, durationMs, ... }
   const cell = el("div", { class: "cell assistant" });
   const card = el("div", { class: "tool-card" });
   card.innerHTML = `
     <div class="tc-head">
-      <span class="status-dot ${item.status}"></span>
+      <span class="status-dot ${escapeHtml(item.status)}"></span>
       <span class="badge">shell</span>
-      <span>${escapeHtml(item.status)}${item.exit_code != null ? ` · exit ${item.exit_code}` : ""}</span>
+      <span>${escapeHtml(item.status)}${item.exitCode != null ? ` · exit ${item.exitCode}` : ""}</span>
     </div>
     <div class="tc-cmd">$ ${escapeHtml(item.command ?? "")}</div>
   `;
-  if (item.aggregated_output) {
+  if (item.aggregatedOutput) {
     const pre = el("pre");
-    pre.textContent = item.aggregated_output;
+    pre.textContent = item.aggregatedOutput;
     card.appendChild(pre);
   }
   cell.appendChild(card);
   return cell;
 }
 
+// v2 PatchChangeKind is a tagged union: { type: "add" | "delete" | "update", … }.
+// Older payloads may still carry a plain string; tolerate both for safety.
+function patchKind(k) {
+  if (!k) return "update";
+  if (typeof k === "string") return k;
+  return k.type ?? "update";
+}
+
 function renderFileChange(item) {
   const cell = el("div", { class: "cell assistant" });
   const card = el("div", { class: "tool-card" });
-  const counts = item.changes?.reduce((acc, c) => { acc[c.kind] = (acc[c.kind] ?? 0) + 1; return acc; }, {}) ?? {};
+  const counts = item.changes?.reduce((acc, c) => {
+    const kind = patchKind(c.kind);
+    acc[kind] = (acc[kind] ?? 0) + 1; return acc;
+  }, {}) ?? {};
   const summary = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ");
   card.innerHTML = `
     <div class="tc-head">
-      <span class="status-dot ${item.status}"></span>
+      <span class="status-dot ${escapeHtml(item.status)}"></span>
       <span class="badge">apply_patch</span>
       <span>${escapeHtml(item.status)}${summary ? ` · ${summary}` : ""}</span>
     </div>
   `;
   for (const c of item.changes ?? []) {
+    const kind = patchKind(c.kind);
     const file = el("div", { class: "diff-file" });
     file.innerHTML = `
       <header>
-        <span class="kind ${c.kind}">${c.kind}</span>
+        <span class="kind ${escapeHtml(kind)}">${escapeHtml(kind)}</span>
         <span>${escapeHtml(c.path)}</span>
       </header>
       ${c.diff ? `<div class="diff-body">${renderDiff(c.diff)}</div>` : ""}
@@ -453,37 +531,25 @@ function renderDiff(diff) {
 }
 
 function renderMcp(item) {
+  // v2 mcpToolCall: { server, tool, status, arguments, result, error, durationMs }
   const cell = el("div", { class: "cell assistant" });
   const card = el("div", { class: "tool-card" });
   card.innerHTML = `
     <div class="tc-head">
-      <span class="status-dot ${item.status}"></span>
+      <span class="status-dot ${escapeHtml(item.status)}"></span>
       <span class="badge">mcp</span>
-      <span>${escapeHtml(item.server)} · ${escapeHtml(item.tool)} · ${escapeHtml(item.status)}</span>
+      <span>${escapeHtml(item.server ?? "")} · ${escapeHtml(item.tool ?? "")} · ${escapeHtml(item.status ?? "")}</span>
     </div>
     <details><summary>arguments</summary><pre>${escapeHtml(JSON.stringify(item.arguments, null, 2))}</pre></details>
     ${item.result ? `<details><summary>result</summary><pre>${escapeHtml(JSON.stringify(item.result, null, 2))}</pre></details>` : ""}
-    ${item.error ? `<div class="tc-meta" style="color:var(--danger)">${escapeHtml(item.error.message)}</div>` : ""}
+    ${item.error ? `<div class="tc-meta" style="color:var(--danger)">${escapeHtml(item.error.message ?? JSON.stringify(item.error))}</div>` : ""}
   `;
   cell.appendChild(card);
   return cell;
 }
 
-function renderWebSearch(item) {
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  card.innerHTML = `
-    <div class="tc-head">
-      <span class="status-dot completed"></span>
-      <span class="badge">web_search</span>
-    </div>
-    <div class="tc-cmd">${escapeHtml(item.query ?? "")}</div>
-  `;
-  cell.appendChild(card);
-  return cell;
-}
-
-function renderTodoList(item) {
+function renderPlan(item) {
+  // v2 plan item: { id, text }
   const cell = el("div", { class: "cell assistant" });
   const card = el("div", { class: "tool-card" });
   card.innerHTML = `
@@ -491,27 +557,7 @@ function renderTodoList(item) {
       <span class="status-dot completed"></span>
       <span class="badge">plan</span>
     </div>
-  `;
-  const ul = el("ul", { class: "todo-list" });
-  for (const t of item.items ?? []) {
-    const li = el("li", { class: t.completed ? "done" : "" });
-    li.append(t.text);
-    ul.appendChild(li);
-  }
-  card.appendChild(ul);
-  cell.appendChild(card);
-  return cell;
-}
-
-function renderErrorItem(item) {
-  const cell = el("div", { class: "cell assistant" });
-  const card = el("div", { class: "tool-card" });
-  card.innerHTML = `
-    <div class="tc-head">
-      <span class="status-dot failed"></span>
-      <span class="badge">error</span>
-    </div>
-    <pre>${escapeHtml(item.message ?? "")}</pre>
+    <pre>${escapeHtml(item.text ?? "")}</pre>
   `;
   cell.appendChild(card);
   return cell;
@@ -699,21 +745,27 @@ function onSubmit(e) {
 async function startTurn(text) {
   setInFlight(true);
   try {
-    let conversationId = state.activeThreadId;
-    if (!conversationId) {
+    let threadId = state.activeThreadId;
+    if (!threadId) {
+      // Canonical v2 ThreadStartParams: `sandbox` (not `sandboxMode`),
+      // `approvalPolicy`, `experimentalRawEvents`, `persistExtendedHistory`
+      // are required by the schema. The response is { thread: Thread, ... }.
       const r = await rpcCall("thread/start", {
         cwd: state.whoami?.workdir,
         model: state.settings.model,
-        sandboxMode: state.settings.sandboxMode,
+        sandbox: state.settings.sandboxMode,
         approvalPolicy: state.settings.approvalPolicy,
-        modelReasoningEffort: state.settings.modelReasoningEffort,
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
       });
-      conversationId = r?.conversationId ?? null;
-      if (conversationId) state.activeThreadId = conversationId;
+      threadId = r?.thread?.id ?? null;
+      if (threadId) state.activeThreadId = threadId;
     }
+    // Canonical v2 TurnStartParams: { threadId, input: UserInput[] }.
+    // UserInput "text" requires `text_elements` per the schema.
     await rpcCall("turn/start", {
-      conversationId,
-      input: [{ type: "text", text }],
+      threadId,
+      input: [{ type: "text", text, text_elements: [] }],
     });
   } catch (e) {
     setInFlight(false);
@@ -722,8 +774,14 @@ async function startTurn(text) {
 }
 
 async function interruptTurn() {
-  if (!state.activeThreadId) return;
-  try { await rpcCall("turn/interrupt", { conversationId: state.activeThreadId }); } catch {}
+  if (!state.activeThreadId || !state.activeTurnId) return;
+  // Canonical v2 TurnInterruptParams: { threadId, turnId }.
+  try {
+    await rpcCall("turn/interrupt", {
+      threadId: state.activeThreadId,
+      turnId: state.activeTurnId,
+    });
+  } catch {}
 }
 
 function autoGrowReset(t) { t.style.height = "auto"; }
@@ -816,10 +874,13 @@ function handleSlash(text) {
       appendSystem("Pick a thread from the sidebar to resume.");
       return;
     case "/reset":
-      // Canonical reset: end the current thread and start a fresh one on
-      // the next user turn. Mirrors codex-tui's /reset.
-      if (state.activeThreadId) {
-        rpcCall("thread/interrupt", { conversationId: state.activeThreadId }).catch(() => {});
+      // Canonical reset: interrupt any in-flight turn and start a fresh
+      // thread on the next user turn. Mirrors codex-tui's /reset.
+      if (state.activeThreadId && state.activeTurnId) {
+        rpcCall("turn/interrupt", {
+          threadId: state.activeThreadId,
+          turnId: state.activeTurnId,
+        }).catch(() => {});
       }
       newThread();
       appendSystem("Conversation reset.");
@@ -828,8 +889,8 @@ function handleSlash(text) {
       // Canonical compaction: ask the backend to summarize and prune
       // conversation history. Mirrors codex-tui's /compact.
       if (!state.activeThreadId) { appendSystem("No active thread to compact.", "error"); return; }
-      rpcCall("thread/compact", { conversationId: state.activeThreadId })
-        .then(() => appendSystem("History compacted."))
+      rpcCall("thread/compact/start", { threadId: state.activeThreadId })
+        .then(() => appendSystem("Compact requested."))
         .catch((e) => appendSystem(`compact failed: ${e.message}`, "error"));
       return;
     default:
@@ -897,10 +958,14 @@ function openLogin() {
         // verbatim and intercepts the `account/updated` notification to
         // persist the resulting token in the session.
         await fetch("/api/oauth/chatgpt/start", { method: "POST" });
-        const r = await rpcCall("account/login/start", { method: "chatgpt" });
-        const verificationUri = r?.verificationUri;
+        // Canonical v2 LoginAccountParams: { type: "chatgptDeviceCode" }.
+        // Response is { type: "chatgptDeviceCode", loginId, verificationUrl, userCode }.
+        const r = await rpcCall("account/login/start", { type: "chatgptDeviceCode" });
+        const verificationUrl = r?.verificationUrl ?? r?.authUrl;
         const userCode = r?.userCode;
-        status.innerHTML = `Open <a href="${escapeHtml(verificationUri)}" target="_blank" rel="noopener">${escapeHtml(verificationUri)}</a> and enter code <code>${escapeHtml(userCode)}</code>.`;
+        status.innerHTML = userCode
+          ? `Open <a href="${escapeHtml(verificationUrl)}" target="_blank" rel="noopener">${escapeHtml(verificationUrl)}</a> and enter code <code>${escapeHtml(userCode)}</code>.`
+          : `Open <a href="${escapeHtml(verificationUrl)}" target="_blank" rel="noopener">${escapeHtml(verificationUrl)}</a> to continue.`;
         // The mock backend resolves the OAuth flow via an `account/updated`
         // notification; that handler closes the modal.
         const onSignedIn = () => { closeModal(); window.removeEventListener("codex:signedIn", onSignedIn); };
@@ -949,22 +1014,27 @@ async function openMcpModal() {
   `, async (m) => {
     const refresh = async () => {
       try {
+        // v2 ListMcpServerStatusResponse: { data: McpServerStatus[], nextCursor }.
         const r = await rpcCall("mcpServerStatus/list", {});
         const list = m.querySelector("#mcp-list");
-        const servers = r?.servers ?? [];
+        const servers = r?.data ?? r?.servers ?? [];
         if (servers.length === 0) {
           list.innerHTML = `<div class="muted">No MCP servers configured.</div>`;
         } else {
-          list.innerHTML = servers.map((s) => `
+          list.innerHTML = servers.map((s) => {
+            const startup = s.startupState ?? s.status ?? "?";
+            const ok = startup === "running" || startup === "connected";
+            const tools = (s.tools ?? []).map((t) => t.name ?? t).filter(Boolean);
+            return `
             <div class="tool-card" style="margin-bottom:8px">
               <div class="tc-head">
-                <span class="status-dot ${s.status === "connected" ? "completed" : "failed"}"></span>
+                <span class="status-dot ${ok ? "completed" : "failed"}"></span>
                 <strong>${escapeHtml(s.name)}</strong>
-                <span class="muted">${escapeHtml(s.status ?? "?")}</span>
+                <span class="muted">${escapeHtml(startup)}</span>
               </div>
-              ${s.tools ? `<div class="tc-meta">tools: ${escapeHtml((s.tools ?? []).join(", "))}</div>` : ""}
-            </div>
-          `).join("");
+              ${tools.length ? `<div class="tc-meta">tools: ${escapeHtml(tools.join(", "))}</div>` : ""}
+            </div>`;
+          }).join("");
         }
       } catch (e) {
         m.querySelector("#mcp-list").innerHTML = `<div class="muted">Error: ${escapeHtml(e.message)}</div>`;
@@ -981,9 +1051,11 @@ async function openMcpModal() {
       const name = m.querySelector("#mcp-name").value.trim();
       const cmd  = m.querySelector("#mcp-cmd").value.trim();
       if (!name || !cmd) return;
+      // Canonical v2 ConfigValueWriteParams: { keyPath, value, mergeStrategy }.
       await rpcCall("config/value/write", {
-        path: ["mcp_servers", name],
+        keyPath: `mcp_servers.${name}`,
         value: { command: cmd.split(" ")[0], args: cmd.split(" ").slice(1) },
+        mergeStrategy: "upsert",
       }).catch(() => {});
       await rpcCall("config/mcpServer/reload", {}).catch(() => {});
       await refresh();

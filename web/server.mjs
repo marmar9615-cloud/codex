@@ -12,17 +12,16 @@
 //   2. spawns one `codex app-server` (or the bundled mock) bound to that
 //      session's auth + workdir,
 //   3. on spawn, if an API key is set, sends a single canonical
-//      `loginApiKey` JSON-RPC request to the child (still inside the
-//      protocol; no custom envelope),
+//      `account/login/start` request with `{type: "apiKey", apiKey}` to
+//      the child (still inside the protocol; no custom envelope),
 //   4. then pipes raw JSON-RPC frames between the WS and the child stdio
 //      until either side closes.
 //
 // Backend selection:
 //   - real:  $CODEX_BIN exists. Spawns `$CODEX_BIN app-server`. The browser
-//            then drives auth via canonical methods (`loginApiKey`,
-//            `account/login/start`).
+//            drives auth via the canonical `account/login/start` method.
 //   - mock:  $CODEX_BIN is unset or missing. Spawns the bundled JS mock
-//            which speaks the same JSON-RPC subset for development.
+//            which speaks the same JSON-RPC v2 subset for development.
 //
 // Credentials never leave the server: API key + OAuth token are held in an
 // in-memory session map keyed by an http-only, secure session cookie.
@@ -53,8 +52,8 @@ mkdirSync(WORKDIR_ROOT, { recursive: true });
 // -------- session store (in-memory) --------
 // session: {
 //   id, apiKey?, oauth?, createdAt, lastSeenAt, workdir,
-//   threads: Map<conversationId, { id, name, lastActive, lastTurnText? }>,
-//   activeConversationId?,
+//   threads: Map<threadId, { id, name, lastActive, lastTurnText? }>,
+//   activeThreadId?,
 // }
 const sessions = new Map();
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -80,7 +79,7 @@ function makeSession(id) {
     id, apiKey: undefined, oauth: undefined,
     createdAt: Date.now(), lastSeenAt: Date.now(), workdir,
     threads: new Map(),
-    activeConversationId: undefined,
+    activeThreadId: undefined,
   };
 }
 
@@ -293,8 +292,8 @@ class BridgeConnection {
     if (this.session.apiKey) {
       this.writeChild({
         jsonrpc: "2.0", id: `gw-${randomUUID()}`,
-        method: "loginApiKey",
-        params: { apiKey: this.session.apiKey },
+        method: "account/login/start",
+        params: { type: "apiKey", apiKey: this.session.apiKey },
       });
     }
   }
@@ -322,21 +321,34 @@ class BridgeConnection {
   // Server-side observers that update session bookkeeping (thread list,
   // OAuth token cache). They do NOT modify or replace the forwarded frame.
   observeForSession(msg) {
-    if (msg.method === "thread/started" && msg.params?.conversationId) {
-      const id = msg.params.conversationId;
-      const existing = this.session.threads.get(id) ?? { id, name: id, lastActive: Date.now() };
+    // `thread/started` carries `{ thread: Thread }` per v2 schema.
+    if (msg.method === "thread/started" && msg.params?.thread?.id) {
+      const t = msg.params.thread;
+      const existing = this.session.threads.get(t.id)
+        ?? { id: t.id, name: t.name ?? t.id, lastActive: Date.now() };
+      existing.name = t.name ?? existing.name;
       existing.lastActive = Date.now();
-      this.session.threads.set(id, existing);
-      this.session.activeConversationId = id;
+      this.session.threads.set(t.id, existing);
+      this.session.activeThreadId = t.id;
     }
-    if (msg.method === "account/updated" && msg.params?.account) {
-      const acc = msg.params.account;
-      this.session.oauth = {
-        ...(this.session.oauth ?? {}),
-        account: typeof acc === "string" ? acc : (acc.email ?? acc.id ?? "chatgpt"),
-        token: msg.params.authToken ?? this.session.oauth?.token ?? "oauth-set",
-        pending: false,
-      };
+    // `account/updated` carries `{ authMode, planType }` per v2 schema.
+    if (msg.method === "account/updated") {
+      const authMode = msg.params?.authMode ?? null;
+      const planType = msg.params?.planType ?? null;
+      if (authMode === "chatgpt" || authMode === "chatgptAuthTokens") {
+        this.session.oauth = {
+          ...(this.session.oauth ?? {}),
+          account: planType ? `chatgpt:${planType}` : "chatgpt",
+          token: this.session.oauth?.token ?? "oauth-set",
+          authMode, planType, pending: false,
+        };
+      } else if (authMode === "apikey") {
+        // Real backend confirmed the API-key login; nothing to persist beyond
+        // what we already hold in the session.
+        this.session.oauth = undefined;
+      } else if (authMode === null) {
+        this.session.oauth = undefined;
+      }
     }
   }
 
@@ -349,8 +361,9 @@ class BridgeConnection {
     try { parsed = JSON.parse(s); } catch { return; }
     if (!parsed || parsed.jsonrpc !== "2.0") return;
     // Track outgoing turn intent so we can name the thread on first user turn.
-    if (parsed.method === "turn/start" && this.session.activeConversationId) {
-      const t = this.session.threads.get(this.session.activeConversationId);
+    const activeId = parsed.params?.threadId ?? this.session.activeThreadId;
+    if (parsed.method === "turn/start" && activeId) {
+      const t = this.session.threads.get(activeId);
       if (t) {
         const text = (parsed.params?.input ?? []).map((p) => p?.text ?? "").join(" ").trim();
         if (text && (!t.name || t.name === t.id)) t.name = text.slice(0, 48);
