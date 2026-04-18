@@ -385,20 +385,25 @@ app.use(express.static(PUBLIC_DIR));
 
 app.get("/api/whoami", (req, res) => {
   const session = getOrCreateSession(req, res);
+  const hasOauth = Boolean(
+    session.oauth?.accessToken
+      || session.oauth?.authMode === "chatgpt"
+      || session.oauth?.authMode === "chatgptAuthTokens",
+  );
   res.json({
     sessionId: session.id,
     hasApiKey: Boolean(session.apiKey),
-    hasOauth: Boolean(session.oauth?.accessToken),
+    hasOauth,
     oauthPending: Boolean(session.oauth?.pending),
     oauthError: session.oauth?.error ?? null,
-    account: session.oauth?.accessToken
+    account: hasOauth
       ? {
-          email: session.oauth.email,
-          planType: session.oauth.planType,
-          chatgptAccountId: session.oauth.chatgptAccountId,
+          email: session.oauth?.email ?? null,
+          planType: session.oauth?.planType ?? null,
+          chatgptAccountId: session.oauth?.chatgptAccountId ?? null,
         }
       : null,
-    authMethod: session.oauth?.accessToken ? "chatgptAuthTokens" : (session.apiKey ? "apikey" : null),
+    authMethod: hasOauth ? (session.oauth?.authMode ?? "chatgpt") : (session.apiKey ? "apikey" : null),
     backend: backendState(),
     realBinaryConfigured: hasRealBackendConfigured(),
     workdir: session.workdir,

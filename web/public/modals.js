@@ -14,6 +14,10 @@ export function createModals({
   appendSystem,
   clearAuthRequiredCard,
 }) {
+  function isLocalBrowserFlowSupported() {
+    return ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  }
+
   function modal(html, onMount) {
     const root = $("#modal-root");
     root.innerHTML = `<div class="modal-backdrop"><div class="modal">${html}</div></div>`;
@@ -201,6 +205,28 @@ export function createModals({
         const status = mount.querySelector("#oauth-status");
         status.textContent = "Starting ChatGPT sign-in…";
         try {
+          if (isLocalBrowserFlowSupported()) {
+            const result = await rpcCall("account/login/start", { type: "chatgpt" });
+            if (result?.type !== "chatgpt" || !result.authUrl) {
+              throw new Error("browser auth URL was not returned");
+            }
+            state.whoami = {
+              ...(state.whoami ?? {}),
+              oauthPending: true,
+              oauthError: null,
+            };
+            status.innerHTML = `Open <a href="${escapeHtml(result.authUrl)}" target="_blank" rel="noopener">${escapeHtml(result.authUrl)}</a> and finish sign-in in the new tab.`;
+            window.open(result.authUrl, "_blank", "noopener,noreferrer");
+            const onSignedIn = async () => {
+              window.removeEventListener("codex:signedIn", onSignedIn);
+              clearAuthRequiredCard();
+              closeModal();
+              await refreshAccount().catch(() => {});
+            };
+            window.addEventListener("codex:signedIn", onSignedIn, { once: true });
+            return;
+          }
+
           const response = await fetch("/api/oauth/chatgpt/start", { method: "POST" });
           const data = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(data.error ?? `start failed (${response.status})`);

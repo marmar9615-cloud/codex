@@ -740,6 +740,9 @@ function onAccountClick() {
 }
 
 async function doLogout() {
+  if (state.initialized) {
+    await rpc.rpcCall("account/logout", {}).catch(() => {});
+  }
   await fetch("/api/logout", { method: "POST" });
   renderers.clearAuthRequiredCard();
   await refreshWhoAmI();
