@@ -93,6 +93,7 @@ const modals = createModals({
   rpcReply: rpc.rpcReply,
   refreshWhoAmI,
   refreshAccount,
+  refreshModels,
   refreshConfigState,
   refreshExperimentalFeatures,
   pushSettingsToBackend,
@@ -194,15 +195,26 @@ async function refreshThreads() {
 async function refreshModels() {
   if (!state.initialized) return;
   try {
-    const response = await rpc.rpcCall("model/list", {
+    let response = await rpc.rpcCall("model/list", {
       limit: 100,
       includeHidden: false,
     });
-    const models = Array.isArray(response?.data)
+    let models = Array.isArray(response?.data)
       ? response.data
       : Array.isArray(response?.models)
         ? response.models
         : [];
+    if (!models.length) {
+      response = await rpc.rpcCall("model/list", {
+        limit: 100,
+        includeHidden: true,
+      });
+      models = Array.isArray(response?.data)
+        ? response.data
+        : Array.isArray(response?.models)
+          ? response.models
+          : [];
+    }
     state.models = models;
     if (!state.settings.model && models.length) {
       const pick = models.find((model) => model.isDefault) ?? models[0];

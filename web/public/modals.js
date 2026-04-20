@@ -7,6 +7,7 @@ export function createModals({
   rpcReply,
   refreshWhoAmI,
   refreshAccount,
+  refreshModels,
   refreshConfigState,
   refreshExperimentalFeatures,
   pushSettingsToBackend,
@@ -508,17 +509,43 @@ export function createModals({
     `;
   }
 
-  function openSettings(focus) {
+  async function openSettings(focus) {
+    if (state.initialized && !state.models.length) {
+      try {
+        await refreshModels();
+      } catch (error) {
+        console.warn("settings model refresh failed", error.message);
+      }
+    }
     const settings = state.settings;
     const config = state.configSnapshot?.config ?? {};
     const configLayers = state.configSnapshot?.layers ?? [];
     const requirements = state.configRequirements?.requirements ?? null;
-    const modelOptions = state.models
+    const modelEntries = [...state.models];
+    if (
+      settings.model &&
+      !modelEntries.some((model) => {
+        const id = model.id ?? model.slug ?? model.model;
+        return id === settings.model;
+      })
+    ) {
+      modelEntries.unshift({
+        id: settings.model,
+        displayName: `${settings.model} (current)`,
+      });
+    }
+    const modelOptions = modelEntries.length
+      ? modelEntries
       .map((model) => {
         const id = model.id ?? model.slug ?? model.model;
-        return `<option value="${escapeHtml(id)}" ${settings.model === id ? "selected" : ""}>${escapeHtml(id)}</option>`;
+        const label =
+          model.displayName && model.displayName !== id
+            ? `${model.displayName} (${id})`
+            : id;
+        return `<option value="${escapeHtml(id)}" ${settings.model === id ? "selected" : ""}>${escapeHtml(label)}</option>`;
       })
-      .join("");
+      .join("")
+      : '<option value="">No models available</option>';
     const select = (name, options) =>
       `<select name="${name}">${options.map((option) => `<option value="${option}" ${settings[name] === option ? "selected" : ""}>${option}</option>`).join("")}</select>`;
     const tabs = [
@@ -558,7 +585,7 @@ export function createModals({
       ${panel(
         "model",
         `
-        <div class="modal-row"><label>Model</label><select name="model">${modelOptions}</select></div>
+        <div class="modal-row"><label>Model</label><select name="model" ${modelEntries.length ? "" : "disabled"}>${modelOptions}</select></div>
         <div class="modal-row"><label>Server working directory</label><input value="${escapeHtml(state.whoami?.workdir ?? "")}" disabled /></div>
       `,
         tabForFocus !== "model",
