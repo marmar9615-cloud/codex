@@ -4,8 +4,11 @@ use ratatui::widgets::WidgetRef;
 
 use super::popup_consts::MAX_POPUP_ROWS;
 use super::scroll_state::ScrollState;
+use super::selection_popup_common::ColumnWidthConfig;
+use super::selection_popup_common::ColumnWidthMode;
 use super::selection_popup_common::GenericDisplayRow;
-use super::selection_popup_common::render_rows;
+use super::selection_popup_common::measure_rows_height_with_col_width_mode;
+use super::selection_popup_common::render_rows_with_col_width_mode;
 use super::slash_commands;
 use crate::render::Insets;
 use crate::render::RectExt;
@@ -15,6 +18,12 @@ use crate::slash_command::SlashCommand;
 // `quit` is an alias of `exit`, so we skip `quit` here.
 // `approvals` is an alias of `permissions`.
 const ALIAS_COMMANDS: &[SlashCommand] = &[SlashCommand::Quit, SlashCommand::Approvals];
+
+// Derive the description column from the full filtered command list rather than
+// only the rows visible in the current viewport so columns stay aligned while
+// the user scrolls through the popup.
+const COMMAND_COLUMN_WIDTH: ColumnWidthConfig =
+    ColumnWidthConfig::new(ColumnWidthMode::AutoAllRows, /*name_column_width*/ None);
 
 /// A selectable item in the popup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,10 +118,15 @@ impl CommandPopup {
     /// Determine the preferred height of the popup for a given width.
     /// Accounts for wrapped descriptions so that long tooltips don't overflow.
     pub(crate) fn calculate_required_height(&self, width: u16) -> u16 {
-        use super::selection_popup_common::measure_rows_height;
         let rows = self.rows_from_matches(self.filtered());
 
-        measure_rows_height(&rows, &self.state, MAX_POPUP_ROWS, width)
+        measure_rows_height_with_col_width_mode(
+            &rows,
+            &self.state,
+            MAX_POPUP_ROWS,
+            width,
+            COMMAND_COLUMN_WIDTH,
+        )
     }
 
     /// Compute exact/prefix matches over built-in commands and user prompts,
@@ -223,7 +237,7 @@ impl CommandPopup {
 impl WidgetRef for CommandPopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let rows = self.rows_from_matches(self.filtered());
-        render_rows(
+        render_rows_with_col_width_mode(
             area.inset(Insets::tlbr(
                 /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,
             )),
@@ -232,6 +246,7 @@ impl WidgetRef for CommandPopup {
             &self.state,
             MAX_POPUP_ROWS,
             "no matches",
+            COMMAND_COLUMN_WIDTH,
         );
     }
 }
@@ -491,6 +506,85 @@ mod tests {
         assert!(
             !cmds.iter().any(|name| name.starts_with("debug")),
             "expected no /debug* command in popup menu, got {cmds:?}"
+        );
+    }
+
+    fn render_popup_to_lines(popup: &CommandPopup, width: u16, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        popup.render_ref(area, &mut buf);
+        (0..area.height)
+            .map(|row| {
+                let mut line = String::new();
+                for col in 0..area.width {
+                    let symbol = buf[(area.x + col, area.y + row)].symbol();
+                    if symbol.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                line
+            })
+            .collect()
+    }
+
+    #[test]
+    fn description_column_does_not_shift_when_scrolling() {
+        // Reproduce https://github.com/openai/codex/issues/19499 — the slash
+        // command popup should keep description columns stable while scrolling
+        // because column width is derived from all rows, not just the
+        // currently visible viewport.
+        let popup_initial = CommandPopup::new(CommandPopupFlags::default());
+
+        // Move selection past the long-named commands at the top (e.g.
+        // /experimental) so the visible viewport for the second popup has a
+        // different "longest visible name" than the unscrolled view.
+        let mut popup_scrolled = CommandPopup::new(CommandPopupFlags::default());
+        for _ in 0..11 {
+            popup_scrolled.move_down();
+        }
+
+        let lines_initial = render_popup_to_lines(&popup_initial, /*width*/ 80, /*height*/ 8);
+        let lines_scrolled = render_popup_to_lines(&popup_scrolled, /*width*/ 80, /*height*/ 8);
+
+        // /memories appears in both viewports (item index 3), so we can compare
+        // the column at which its description begins.
+        let memories_marker = "/memories";
+        let memories_desc = "configure memory use and generation";
+
+        let line_initial = lines_initial
+            .iter()
+            .find(|line| line.contains(memories_marker) && line.contains(memories_desc))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected /memories row in initial render, got:\n{}",
+                    lines_initial.join("\n")
+                )
+            });
+        let line_scrolled = lines_scrolled
+            .iter()
+            .find(|line| line.contains(memories_marker) && line.contains(memories_desc))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected /memories row in scrolled render, got:\n{}",
+                    lines_scrolled.join("\n")
+                )
+            });
+
+        let col_initial = line_initial
+            .find(memories_desc)
+            .expect("description should appear in initial render");
+        let col_scrolled = line_scrolled
+            .find(memories_desc)
+            .expect("description should appear in scrolled render");
+
+        assert_eq!(
+            col_initial,
+            col_scrolled,
+            "/memories description column shifted across scroll:\ninitial:\n{}\n\nscrolled:\n{}",
+            lines_initial.join("\n"),
+            lines_scrolled.join("\n"),
         );
     }
 }
