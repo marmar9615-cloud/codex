@@ -150,6 +150,52 @@ Phase 4: Native polish
 - Add Android SAF directory native module if Expo APIs are not enough.
 - Add richer editor, search, syntax highlighting, WebView preview controls, and offline project metadata.
 
+Final Phase: Store Release Readiness
+
+iOS / App Store:
+
+- Apple Developer account required.
+- App Store Connect app record required.
+- Bundle identifier planning using `IOS_BUNDLE_IDENTIFIER`.
+- App name, subtitle, SKU, and category selection.
+- Privacy Policy URL using `PRIVACY_POLICY_URL`.
+- App Privacy answers and data collection disclosures.
+- Export compliance and encryption answers.
+- TestFlight internal testing before any wider release.
+- TestFlight external testing if needed.
+- App Review submission checklist.
+- iPhone screenshots.
+- App icon and launch assets.
+- Version/build number policy using `expo.version` and iOS `buildNumber`.
+- Review notes explaining:
+  - this is a mobile coding-agent IDE.
+  - file access is limited to the app workspace and user-selected files.
+  - builds/tests run remotely in a sandboxed runner.
+  - the app does not execute arbitrary downloaded code locally on iPhone.
+  - ChatGPT/Codex sign-in is either officially supported or disabled/gated.
+
+Android / Google Play:
+
+- Google Play Developer account required.
+- Play Console app record required.
+- Permanent Android package name using `GOOGLE_PLAY_PACKAGE_NAME`.
+- Android App Bundle / AAB production build.
+- Play App Signing.
+- Internal testing track before production release.
+- Closed/open testing if needed.
+- Data Safety form.
+- Privacy Policy URL using `PRIVACY_POLICY_URL`.
+- Content rating.
+- Target audience/declarations.
+- Store listing assets.
+- Screenshots.
+- VersionCode/versionName policy using Android `versionCode` and `expo.version`.
+- Review notes explaining:
+  - scoped storage / SAF usage.
+  - no broad all-files access by default.
+  - remote sandbox runner for heavy builds/tests.
+  - clear user approval before file changes.
+
 ## Initial Internal Seam
 
 The mobile app should not call `codex-core` directly. The first publishable seam is:

@@ -1,0 +1,63 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote",
+    "requireCommit": true
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "IOS_BUNDLE_IDENTIFIER": "IOS_BUNDLE_IDENTIFIER",
+        "GOOGLE_PLAY_PACKAGE_NAME": "GOOGLE_PLAY_PACKAGE_NAME",
+        "PRIVACY_POLICY_URL": "PRIVACY_POLICY_URL",
+        "SUPPORT_EMAIL": "SUPPORT_EMAIL",
+        "MARKETING_URL": "MARKETING_URL"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "IOS_BUNDLE_IDENTIFIER": "IOS_BUNDLE_IDENTIFIER",
+        "GOOGLE_PLAY_PACKAGE_NAME": "GOOGLE_PLAY_PACKAGE_NAME",
+        "PRIVACY_POLICY_URL": "PRIVACY_POLICY_URL",
+        "SUPPORT_EMAIL": "SUPPORT_EMAIL",
+        "MARKETING_URL": "MARKETING_URL"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "IOS_BUNDLE_IDENTIFIER": "IOS_BUNDLE_IDENTIFIER",
+        "GOOGLE_PLAY_PACKAGE_NAME": "GOOGLE_PLAY_PACKAGE_NAME",
+        "PRIVACY_POLICY_URL": "PRIVACY_POLICY_URL",
+        "SUPPORT_EMAIL": "SUPPORT_EMAIL",
+        "MARKETING_URL": "MARKETING_URL"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "APP_STORE_CONNECT_APP_ID",
+        "appleTeamId": "APPLE_TEAM_ID",
+        "bundleIdentifier": "IOS_BUNDLE_IDENTIFIER"
+      },
+      "android": {
+        "serviceAccountKeyPath": "GOOGLE_SERVICE_ACCOUNT_JSON_PATH",
+        "track": "internal",
+        "releaseStatus": "draft"
+      }
+    }
+  }
+}

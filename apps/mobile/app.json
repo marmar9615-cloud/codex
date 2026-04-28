@@ -9,16 +9,21 @@
     "newArchEnabled": true,
     "plugins": ["expo-router", "expo-secure-store", "expo-document-picker"],
     "ios": {
-      "bundleIdentifier": "com.openai.codex.mobile.mvp",
+      "bundleIdentifier": "IOS_BUNDLE_IDENTIFIER",
+      "buildNumber": "1",
       "supportsTablet": true
     },
     "android": {
-      "package": "com.openai.codex.mobile.mvp"
+      "package": "GOOGLE_PLAY_PACKAGE_NAME",
+      "versionCode": 1
     },
     "extra": {
       "chatgptAccountAuthEnabled": false,
       "devApiKeyAuthEnabled": false,
-      "runnerBaseUrl": "http://127.0.0.1:8787"
+      "runnerBaseUrl": "http://127.0.0.1:8787",
+      "privacyPolicyUrl": "PRIVACY_POLICY_URL",
+      "supportEmail": "SUPPORT_EMAIL",
+      "marketingUrl": "MARKETING_URL"
     }
   }
 }
