@@ -19,7 +19,8 @@ This is the first mobile scaffold for Codex. It is an Expo React Native app with
 - Dev API-key auth flag separated from production auth.
 - Diff review shell backed by shared patch-apply utility tests.
 - Stateful sample-project flow from project list/import to editor, runner job, SSE logs, patch review, and artifact metadata.
-- Runner client methods for session creation, snapshot upload, job start/status, SSE parsing, patch fetch, and artifact fetch.
+- Runner client methods for capabilities, session creation, snapshot upload, job start/status, SSE parsing, patch fetch, and artifact fetch.
+- Developer display for fake vs `codex-app-server` runner mode.
 
 ## What Is Stubbed
 
@@ -27,7 +28,7 @@ This is the first mobile scaffold for Codex. It is an Expo React Native app with
 - Android SAF directory access. The provider shape exists, but full directory-tree access likely needs a native module or verified Expo API support.
 - iOS security-scoped bookmarks. The provider shape exists, but persistent external-folder access likely needs a native module.
 - GitHub clone/import and commit/push.
-- The runner behavior is still fake/deterministic. It does not run Codex core, package managers, compilers, or tests yet.
+- The runner behavior defaults to fake/deterministic. `RUNNER_MODE=codex-app-server` is a developer-gated bridge prototype for Codex app-server thread/turn streaming; package managers, compilers, tests, and real sandbox execution remain future runner work.
 
 ## Run Locally
 
@@ -49,6 +50,17 @@ pnpm --filter @codex/mobile-runner dev
 ```
 
 Then start the app and use `New Sample` -> `Agent` -> `Run Agent` to exercise the fake end-to-end session.
+
+To try the gated app-server bridge from the runner:
+
+```bash
+CODEX_APP_SERVER_BIN=/absolute/path/to/codex \
+RUNNER_MODE=codex-app-server \
+CODEX_APP_SERVER_TRANSPORT=stdio \
+pnpm --filter @codex/mobile-runner dev
+```
+
+The mobile app still talks only to the runner. It does not expose app-server directly to the phone.
 
 For physical-device development, start with Expo Go. Add an Expo development client only when native SAF/security-scoped bookmark modules or other custom native code are introduced.
 Metro currently reports `exp://127.0.0.1:8081` and `http://localhost:8081` when started with `pnpm --filter @codex/mobile exec expo start --localhost`.

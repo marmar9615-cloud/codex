@@ -3,6 +3,7 @@ import {
   assertCreateSessionRequest,
   assertPatchProposal,
   assertReceivePatchRequest,
+  assertRunnerCapabilitiesResponse,
   assertRunnerJob,
   assertStartJobRequest,
   assertUploadSnapshotRequest,
@@ -19,6 +20,7 @@ import type {
   PatchProposal,
   ProjectSnapshot,
   ReceivePatchResponse,
+  RunnerCapabilitiesResponse,
   RunnerError,
   RunnerJob,
   RunnerLogEvent,
@@ -26,6 +28,17 @@ import type {
   UploadSnapshotResponse,
 } from "@codex/mobile-protocol";
 import http from "node:http";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { CodexAppServerBridge } from "./codex/CodexAppServerBridge.js";
+import { CodexAppServerBridgeError } from "./codex/AppServerProcessManager.js";
+import {
+  capabilitiesFromConfig,
+  getCodexBridgePreflightError,
+  loadMobileRunnerConfig,
+} from "./config.js";
+import type { MobileRunnerConfig } from "./config.js";
 
 type ServerState = {
   sessions: Map<string, MobileSession>;
@@ -33,6 +46,9 @@ type ServerState = {
   jobs: Map<string, RunnerJob>;
   artifacts: Map<string, BuildArtifact[]>;
   patches: Map<string, PatchProposal>;
+  workspaces: Map<string, string>;
+  jobPrompts: Map<string, string>;
+  config: MobileRunnerConfig;
   nextSession: number;
   nextJob: number;
   nextPatch: number;
@@ -41,6 +57,7 @@ type ServerState = {
 
 export type MobileRunnerServerOptions = {
   now?: () => string;
+  config?: MobileRunnerConfig;
 };
 
 export type StartMobileRunnerOptions = MobileRunnerServerOptions & {
@@ -50,12 +67,16 @@ export type StartMobileRunnerOptions = MobileRunnerServerOptions & {
 
 export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}): http.Server {
   const now = options.now ?? (() => new Date().toISOString());
+  const config = options.config ?? loadMobileRunnerConfig();
   const state: ServerState = {
     sessions: new Map(),
     snapshots: new Map(),
     jobs: new Map(),
     artifacts: new Map(),
     patches: new Map(),
+    workspaces: new Map(),
+    jobPrompts: new Map(),
+    config,
     nextSession: 1,
     nextJob: 1,
     nextPatch: 1,
@@ -69,7 +90,12 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
       const status = error instanceof HttpError ? error.status : 500;
       const code = error instanceof HttpError ? error.code : "runner_error";
       const message = error instanceof Error ? error.message : "unknown runner error";
-      writeJson<RunnerError>(response, status, { error: message, code });
+      writeJson<RunnerError>(response, status, {
+        error: message,
+        code,
+        sessionId: error instanceof HttpError ? error.sessionId : undefined,
+        jobId: error instanceof HttpError ? error.jobId : undefined,
+      });
     }
   });
 }
@@ -97,6 +123,11 @@ async function routeRequest(
 
   if (request.method === "GET" && path === "/healthz") {
     writeJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (request.method === "GET" && path === "/capabilities") {
+    writeJson<RunnerCapabilitiesResponse>(response, 200, assertRunnerCapabilitiesResponse(capabilitiesFromConfig(state.config)));
     return;
   }
 
@@ -132,6 +163,7 @@ async function routeRequest(
     const session = requireSession(state, sessionId);
     const params = assertUploadSnapshotRequest(await readJson(request));
     validateSnapshotPaths(params);
+    await materializeSnapshot(await ensureSessionWorkspace(state, session.id), params);
     state.snapshots.set(session.id, params);
     const updated = {
       ...session,
@@ -152,17 +184,25 @@ async function routeRequest(
   if (request.method === "POST" && jobCollectionMatch) {
     const session = requireSession(state, jobCollectionMatch[1] ?? "");
     const params = assertStartJobRequest(await readJson(request));
+    validateJobCwd(params.cwd);
+    const preflightError = getCodexBridgePreflightError(state.config);
+    if (preflightError) {
+      throw new HttpError(503, "codex_app_server_unavailable", preflightError, session.id);
+    }
     const timestamp = now();
     const job: RunnerJob = {
       id: formatId("mrj", state.nextJob++),
       sessionId: session.id,
       kind: params.kind,
       command: params.command,
+      mode: state.config.runnerMode,
+      appServerTransport: state.config.runnerMode === "codex-app-server" ? state.config.codexAppServerTransport : undefined,
       status: "queued",
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     state.jobs.set(job.id, job);
+    state.jobPrompts.set(job.id, params.prompt ?? promptFromCommand(params.command));
     state.sessions.set(session.id, { ...session, status: "running", updatedAt: timestamp });
     writeJson<StartJobResponse>(response, 202, {
       job,
@@ -183,7 +223,11 @@ async function routeRequest(
   if (request.method === "GET" && logsMatch) {
     const session = requireSession(state, logsMatch[1] ?? "");
     const job = requireJob(state, logsMatch[2] ?? "", session.id);
-    await streamFakeLogs(response, state, session, job, now);
+    if (job.mode === "codex-app-server") {
+      await streamCodexAppServerLogs(response, state, session, job, now);
+    } else {
+      await streamFakeLogs(response, state, session, job, now);
+    }
     return;
   }
 
@@ -299,6 +343,71 @@ async function streamFakeLogs(
   response.end();
 }
 
+async function streamCodexAppServerLogs(
+  response: http.ServerResponse,
+  state: ServerState,
+  session: MobileSession,
+  job: RunnerJob,
+  now: () => string,
+): Promise<void> {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  const running = assertRunnerJob({ ...job, status: "running", updatedAt: now() });
+  state.jobs.set(job.id, running);
+
+  try {
+    const cwd = await ensureSessionWorkspace(state, session.id);
+    const bridge = new CodexAppServerBridge({
+      bin: state.config.codexAppServerBin,
+      transport: state.config.codexAppServerTransport,
+      timeoutMs: state.config.codexAppServerTimeoutMs,
+      now,
+    });
+    const result = await bridge.runTurn({
+      sessionId: session.id,
+      jobId: job.id,
+      cwd,
+      prompt: state.jobPrompts.get(job.id) ?? promptFromCommand(job.command),
+      onLogEvent: (event) => writeSse(response, "log", event),
+    });
+    const completed = assertRunnerJob({
+      ...running,
+      status: result.status,
+      updatedAt: now(),
+      appServerThreadId: result.appServerThreadId,
+      appServerTurnId: result.appServerTurnId,
+      appServerTransport: state.config.codexAppServerTransport,
+    });
+    state.jobs.set(job.id, completed);
+    state.sessions.set(session.id, { ...session, status: completed.status === "succeeded" ? "ready" : "failed", updatedAt: completed.updatedAt });
+    appendArtifact(state, session.id, createCodexAppServerArtifact(state, session.id, job.id, now()));
+    writeSse(response, "jobStatus", { type: "runner.jobStatus", sessionId: session.id, job: completed });
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : "unknown Codex app-server bridge failure";
+    const code = caught instanceof CodexAppServerBridgeError ? caught.code : "codex_app_server_bridge_error";
+    const failed = assertRunnerJob({ ...running, status: "failed", updatedAt: now(), appServerTransport: state.config.codexAppServerTransport });
+    state.jobs.set(job.id, failed);
+    state.sessions.set(session.id, { ...session, status: "failed", updatedAt: failed.updatedAt });
+    writeSse<RunnerLogEvent>(response, "log", {
+      type: "runner.log",
+      sessionId: session.id,
+      jobId: job.id,
+      sequence: 1,
+      stream: "stderr",
+      level: "error",
+      message: `Codex app-server bridge failed (${code}): ${message}`,
+      createdAt: now(),
+    });
+    writeSse(response, "jobStatus", { type: "runner.jobStatus", sessionId: session.id, job: failed });
+  } finally {
+    response.end();
+  }
+}
+
 function createFakePatch(state: ServerState, sessionId: string, timestamp: string): PatchProposal {
   return assertPatchProposal({
     id: formatId("mrp", state.nextPatch++),
@@ -357,6 +466,21 @@ function createFakeArtifact(state: ServerState, sessionId: string, jobId: string
   });
 }
 
+function createCodexAppServerArtifact(state: ServerState, sessionId: string, jobId: string, timestamp: string): BuildArtifact {
+  return assertBuildArtifact({
+    id: formatId("mra", state.nextArtifact++),
+    sessionId,
+    jobId,
+    kind: "testReport",
+    title: "Codex app-server turn metadata",
+    metadata: {
+      mode: "codex-app-server",
+      note: "Real build artifacts still require the remote sandbox runner milestone.",
+    },
+    createdAt: timestamp,
+  });
+}
+
 function createArtifactFromRequest(
   state: ServerState,
   sessionId: string,
@@ -392,6 +516,13 @@ function validateSnapshotPaths(snapshot: ProjectSnapshot): void {
   }
 }
 
+function validateJobCwd(cwd: string | undefined): void {
+  if (!cwd) {
+    return;
+  }
+  validateWorkspacePath(cwd);
+}
+
 function validateWorkspacePath(path: string): void {
   try {
     normalizeWorkspaceRelativePath(path);
@@ -399,6 +530,37 @@ function validateWorkspacePath(path: string): void {
     const message = error instanceof Error ? error.message : `path escapes workspace: ${path}`;
     throw new HttpError(400, "path_escapes_workspace", message);
   }
+}
+
+async function ensureSessionWorkspace(state: ServerState, sessionId: string): Promise<string> {
+  const existing = state.workspaces.get(sessionId);
+  if (existing) {
+    return existing;
+  }
+  const workspace = await mkdtemp(path.join(os.tmpdir(), `codex-mobile-runner-${sessionId}-`));
+  state.workspaces.set(sessionId, workspace);
+  return workspace;
+}
+
+async function materializeSnapshot(workspaceRoot: string, snapshot: ProjectSnapshot): Promise<void> {
+  for (const deletedPath of snapshot.deletedPaths ?? []) {
+    await rm(resolveWorkspacePath(workspaceRoot, deletedPath), { recursive: true, force: true });
+  }
+  for (const file of snapshot.files) {
+    const absolutePath = resolveWorkspacePath(workspaceRoot, file.path);
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, Buffer.from(file.contentsBase64, "base64"));
+  }
+}
+
+function resolveWorkspacePath(workspaceRoot: string, relativePath: string): string {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  const absolute = path.resolve(workspaceRoot, normalized);
+  const rootWithSeparator = workspaceRoot.endsWith(path.sep) ? workspaceRoot : `${workspaceRoot}${path.sep}`;
+  if (absolute !== workspaceRoot && !absolute.startsWith(rootWithSeparator)) {
+    throw new HttpError(400, "path_escapes_workspace", `path escapes workspace: ${relativePath}`);
+  }
+  return absolute;
 }
 
 function requireSession(state: ServerState, sessionId: string): MobileSession {
@@ -419,6 +581,15 @@ function requireJob(state: ServerState, jobId: string, sessionId: string): Runne
 
 function countFilesChanged(unifiedDiff: string): number {
   return unifiedDiff.split(/\r?\n/).filter((line) => line.startsWith("+++ ")).length;
+}
+
+function promptFromCommand(command: string[]): string {
+  return `Run the requested mobile runner job: ${command.join(" ")}`;
+}
+
+function writeSse<T>(response: http.ServerResponse, event: string, data: T): void {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 async function readJson(request: http.IncomingMessage): Promise<unknown> {
@@ -454,6 +625,8 @@ class HttpError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly sessionId?: string,
+    readonly jobId?: string,
   ) {
     super(message);
     this.name = "HttpError";

@@ -6,6 +6,7 @@ import type {
   GetJobResponse,
   GetPatchResponse,
   GetSessionResponse,
+  RunnerCapabilitiesResponse,
   StartJobResponse,
   UploadSnapshotResponse,
 } from "@codex/mobile-protocol";
@@ -25,6 +26,12 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
     assert.equal(created.session.id, "mrs_0001");
     assert.equal(created.session.status, "created");
 
+    const capabilities = await get<RunnerCapabilitiesResponse>(url, "/capabilities");
+    assert.equal(capabilities.defaultMode, "fake");
+    assert.equal(capabilities.activeMode, "fake");
+    assert.equal(capabilities.fakeRunner, true);
+    assert.equal(capabilities.productionOAuthEnabled, false);
+
     const loaded = await get<GetSessionResponse>(url, `/sessions/${created.session.id}`);
     assert.equal(loaded.session.projectName, "Codex Mobile");
 
@@ -42,6 +49,7 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
       command: ["npm", "test"],
     });
     assert.equal(started.job.id, "mrj_0001");
+    assert.equal(started.job.mode, "fake");
     assert.equal(started.logStreamUrl, `/sessions/${created.session.id}/jobs/${started.job.id}/logs`);
 
     const queued = await get<GetJobResponse>(url, `/sessions/${created.session.id}/jobs/${started.job.id}`);
@@ -57,6 +65,7 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
 
     const completed = await get<GetJobResponse>(url, `/sessions/${created.session.id}/jobs/${started.job.id}`);
     assert.equal(completed.job.status, "succeeded");
+    assert.equal(completed.job.mode, "fake");
 
     const patch = await get<GetPatchResponse>(url, `/sessions/${created.session.id}/patch`);
     assert.equal(patch.patch?.id, "mrp_0001");
@@ -81,6 +90,43 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
     assert.equal(artifacts.artifacts.length, 2);
     assert.equal(artifacts.artifacts[0]?.apkUrl, `https://example.invalid/mobile-runner/${created.session.id}/app-debug.apk`);
     assert.match(artifacts.artifacts[0]?.iosInstructions ?? "", /Mac\/Xcode runner/);
+  } finally {
+    server.close();
+  }
+});
+
+test("codex-app-server mode reports missing binary as a structured runner error", async () => {
+  const { server, url } = await startMobileRunner({
+    port: 0,
+    config: {
+      defaultMode: "fake",
+      runnerMode: "codex-app-server",
+      codexAppServerBin: "/definitely/not/codex",
+      codexAppServerTransport: "stdio",
+      codexAppServerTimeoutMs: 100,
+      supportedTransports: ["stdio"],
+    },
+  });
+  try {
+    const capabilities = await get<RunnerCapabilitiesResponse>(url, "/capabilities");
+    assert.equal(capabilities.activeMode, "codex-app-server");
+    assert.equal(capabilities.codexAppServerBridge, false);
+
+    const created = await post<CreateSessionResponse>(url, "/sessions", {
+      projectId: "project-1",
+      projectName: "Codex Mobile",
+      sourceKind: "appWorkspace",
+    });
+    await post<UploadSnapshotResponse>(url, `/sessions/${created.session.id}/snapshots`, {
+      files: [{ path: "README.md", contentsBase64: Buffer.from("sample").toString("base64") }],
+    });
+    const response = await fetch(`${url}/sessions/${created.session.id}/jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "test", command: ["npm", "test"] }),
+    });
+    assert.equal(response.status, 503);
+    assert.match(JSON.stringify(await response.json()), /codex_app_server_unavailable/);
   } finally {
     server.close();
   }

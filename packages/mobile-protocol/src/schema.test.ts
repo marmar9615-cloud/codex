@@ -14,6 +14,16 @@ test("schemas expose the MVP runner contract", () => {
   ]);
   assert.deepEqual(mobileProtocolSchemas.createSessionRequest.required, ["projectId", "projectName", "sourceKind"]);
   assert.deepEqual(mobileProtocolSchemas.startJobRequest.required, ["kind", "command"]);
+  assert.deepEqual(mobileProtocolSchemas.runnerJob.required, [
+    "id",
+    "sessionId",
+    "kind",
+    "command",
+    "mode",
+    "status",
+    "createdAt",
+    "updatedAt",
+  ]);
   assert.deepEqual(mobileProtocolSchemas.runnerLogEvent.required, [
     "type",
     "sessionId",
@@ -23,6 +33,15 @@ test("schemas expose the MVP runner contract", () => {
     "level",
     "message",
     "createdAt",
+  ]);
+  assert.deepEqual(mobileProtocolSchemas.runnerCapabilitiesResponse.required, [
+    "defaultMode",
+    "activeMode",
+    "fakeRunner",
+    "codexAppServerBridge",
+    "supportedTransports",
+    "productionOAuthEnabled",
+    "remoteSandboxExecution",
   ]);
   assert.deepEqual(mobileProtocolSchemas.patchProposal.required, [
     "id",

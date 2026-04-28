@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
-    "test": "tsx --test src/**/*.test.ts"
+    "sync-app-server-types": "node scripts/sync-app-server-types.mjs",
+    "test": "tsx --test src/*.test.ts src/**/*.test.ts"
   },
   "dependencies": {
     "@codex/mobile-protocol": "workspace:*"

@@ -9,7 +9,7 @@ test("parses runner SSE events and finds final job status", () => {
       'data: {"type":"runner.log","sessionId":"mrs_0001","jobId":"mrj_0001","sequence":1,"stream":"stdout","level":"info","message":"hello","createdAt":"2026-04-28T20:00:00.000Z"}',
       "",
       "event: jobStatus",
-      'data: {"type":"runner.jobStatus","sessionId":"mrs_0001","job":{"id":"mrj_0001","sessionId":"mrs_0001","kind":"test","command":["npm","test"],"status":"succeeded","createdAt":"2026-04-28T20:00:00.000Z","updatedAt":"2026-04-28T20:00:00.000Z"}}',
+      'data: {"type":"runner.jobStatus","sessionId":"mrs_0001","job":{"id":"mrj_0001","sessionId":"mrs_0001","kind":"test","command":["npm","test"],"mode":"fake","status":"succeeded","createdAt":"2026-04-28T20:00:00.000Z","updatedAt":"2026-04-28T20:00:00.000Z"}}',
       "",
     ].join("\n"),
   );
@@ -48,6 +48,30 @@ test("runner client reports offline and HTTP errors", async () => {
         }),
       (error) => error instanceof RunnerClientError && error.status === 500,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runner client validates capabilities response", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          defaultMode: "fake",
+          activeMode: "codex-app-server",
+          fakeRunner: true,
+          codexAppServerBridge: true,
+          supportedTransports: ["stdio"],
+          productionOAuthEnabled: false,
+          remoteSandboxExecution: false,
+        }),
+        { status: 200 },
+      );
+    const capabilities = await new MobileRunnerClient("http://runner.invalid").getCapabilities();
+    assert.equal(capabilities.activeMode, "codex-app-server");
+    assert.deepEqual(capabilities.supportedTransports, ["stdio"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

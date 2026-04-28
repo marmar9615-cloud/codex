@@ -7,9 +7,11 @@ import { ActionButton } from "@/components/ActionButton";
 import { Screen } from "@/components/Screen";
 import { StatusPill } from "@/components/StatusPill";
 import { authFeatureFlags } from "@/config/features";
+import { useProject } from "@/project/ProjectContext";
 import { colors, spacing } from "@/theme";
 
 export function SettingsAuthScreen() {
+  const { runnerCapabilities, refreshRunnerCapabilities, job } = useProject();
   const [state, setState] = useState<MobileAuthState>({ status: "signedOut" });
   const [devKey, setDevKey] = useState("");
   const statusTone = useMemo(() => {
@@ -92,6 +94,33 @@ export function SettingsAuthScreen() {
           >
             Enable Dev Mode
           </ActionButton>
+        </View>
+
+        <View
+          style={{
+            backgroundColor: colors.surface,
+            borderColor: colors.border,
+            borderWidth: 1,
+            borderRadius: 8,
+            padding: spacing.md,
+            gap: spacing.sm,
+          }}
+        >
+          <Text selectable style={{ color: colors.text, fontWeight: "800" }}>
+            Developer runner
+          </Text>
+          <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            The runner defaults to fake mode. Local Codex app-server mode is enabled on the runner with RUNNER_MODE=codex-app-server and never exposes app-server directly to the phone.
+          </Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+            <StatusPill label={`active: ${runnerCapabilities?.activeMode ?? "unknown"}`} tone={runnerCapabilities?.activeMode === "codex-app-server" ? "warning" : "muted"} />
+            <StatusPill label={`job: ${job?.mode ?? "none"}`} tone={job?.mode === "codex-app-server" ? "warning" : "muted"} />
+            <StatusPill label={runnerCapabilities?.productionOAuthEnabled ? "oauth enabled" : "oauth gated"} tone="warning" />
+          </View>
+          <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            Supported bridge transports: {runnerCapabilities?.supportedTransports.join(", ") ?? "unavailable"}. Remote sandbox execution remains a later backend milestone.
+          </Text>
+          <ActionButton onPress={() => void refreshRunnerCapabilities()}>Refresh Capabilities</ActionButton>
         </View>
       </Screen>
     </>

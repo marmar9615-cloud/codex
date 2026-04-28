@@ -1,6 +1,6 @@
 # Codex Mobile App Roadmap
 
-Status: MVP foundation started.
+Status: MVP foundation plus fake end-to-end runner flow are implemented. Milestone 3 adds a gated Codex app-server bridge in the runner while keeping fake mode as the default.
 
 This roadmap designs a publishable iOS and Android Codex mobile app that feels like a mobile Codex CLI/TUI/Desktop client without pretending that a phone is an unrestricted developer workstation. The mobile app is a controller, editor, reviewer, and preview surface. Build and test execution belongs in a sandboxed remote runner.
 
@@ -59,7 +59,8 @@ flowchart TB
     SecureStore["Secure Storage<br/>iOS Keychain / Android Keystore"]
     Workspace["Mobile Workspace Layer<br/>App sandbox + picker grants"]
     Protocol["packages/mobile-protocol<br/>Typed REST/SSE messages"]
-    Runner["services/mobile-runner<br/>Sandbox runner API"]
+    Runner["services/mobile-runner<br/>Sandbox runner API<br/>RUNNER_MODE=fake by default"]
+    Bridge["CodexAppServerBridge<br/>runner-side stdio bridge"]
     CodexHost["Codex App-Server / Core<br/>runner-side only"]
     Sandbox["Remote sandbox envs<br/>npm/cargo/python/gradle/Xcode CI"]
     GitHub["GitHub / Git provider"]
@@ -70,7 +71,8 @@ flowchart TB
     Mobile --> Workspace
     Mobile <-->|REST + SSE logs| Protocol
     Protocol <-->|typed payloads| Runner
-    Runner --> CodexHost
+    Runner --> Bridge
+    Bridge -->|stdio JSON-RPC| CodexHost
     Runner --> Sandbox
     Runner --> GitHub
     Sandbox --> Artifacts
@@ -107,6 +109,7 @@ Runs in remote sandbox:
 - Android file access uses app-specific storage first and Storage Access Framework grants for user-selected files or folders. Broad all-files access is out of scope for this roadmap.
 - Heavy builds, tests, dependency installs, shell commands, Gradle, and Xcode-related workflows run in remote sandbox runners, not on the phone.
 - Production ChatGPT/Codex account auth stays gated until OpenAI confirms a supported public mobile OAuth or device-code flow for this client class.
+- The mobile app does not connect directly to `codex app-server`. The runner owns that local bridge and only exposes the mobile protocol over its own API.
 
 ## MVP Work Items
 
@@ -122,10 +125,13 @@ Phase 0: Foundation in this change
 
 Phase 1: Real runner integration
 
-- Wire the mobile scaffold to the fake runner contract for an end-to-end sample-project session.
+- Wire the mobile scaffold to the fake runner contract for an end-to-end sample-project session. Done.
+- Add `RUNNER_MODE=fake | codex-app-server`, with fake as the default. Done.
+- Add runner capabilities reporting and job metadata showing the active mode. Done.
+- Add a stdio-only `CodexAppServerBridge` prototype behind `RUNNER_MODE=codex-app-server`. Done for bridge startup, initialize, `thread/start`, `turn/start`, notification mapping, and structured unavailable errors.
 - Host the runner in a sandbox-capable environment.
-- Bridge runner sessions to `codex app-server` v2 over local stdio/unix socket or authenticated websocket.
-- Mirror app-server turn/item notifications into mobile-friendly events.
+- Bridge runner sessions to `codex app-server` v2 over local stdio/unix socket or authenticated websocket. Stdio prototype is implemented; unix socket and authenticated local websocket remain future work.
+- Mirror app-server turn/item notifications into mobile-friendly events. Initial log/status mapping is implemented.
 - Map app-server diff/file-change notifications into mobile diff review models.
 - Add project snapshot upload and incremental file sync.
 
@@ -223,3 +229,14 @@ pnpm --filter @codex/mobile start
 ```
 
 The runner currently streams fake logs and returns fake artifact metadata. The mobile app currently renders working navigation and placeholder flows over local sample data.
+
+To try the gated Codex app-server bridge locally, start the runner with:
+
+```bash
+CODEX_APP_SERVER_BIN=/absolute/path/to/codex \
+RUNNER_MODE=codex-app-server \
+CODEX_APP_SERVER_TRANSPORT=stdio \
+pnpm --filter @codex/mobile-runner dev
+```
+
+If the Codex binary cannot start or the bridge cannot initialize, the runner returns a structured error instead of pretending the fake runner is real Codex. Normal mobile testing should continue to use the default `RUNNER_MODE=fake` until remote sandbox infrastructure and supported production ChatGPT/Codex mobile auth are confirmed.

@@ -61,17 +61,26 @@ export type RunnerCommandKind = "build" | "test" | "preview" | "custom";
 export type StartJobRequest = {
   kind: RunnerCommandKind;
   command: string[];
+  prompt?: string;
   cwd?: string;
   environmentId?: string;
 };
 
 export type RunnerJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
+export type RunnerMode = "fake" | "codex-app-server";
+
+export type AppServerTransport = "stdio" | "unix" | "local-ws";
+
 export type RunnerJob = {
   id: string;
   sessionId: string;
   kind: RunnerCommandKind;
   command: string[];
+  mode: RunnerMode;
+  appServerThreadId?: string;
+  appServerTurnId?: string;
+  appServerTransport?: AppServerTransport;
   status: RunnerJobStatus;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
@@ -183,6 +192,16 @@ export type RunnerArtifact = BuildArtifact;
 
 export type ArtifactListResponse = {
   artifacts: BuildArtifact[];
+};
+
+export type RunnerCapabilitiesResponse = {
+  defaultMode: RunnerMode;
+  activeMode: RunnerMode;
+  fakeRunner: true;
+  codexAppServerBridge: boolean;
+  supportedTransports: AppServerTransport[];
+  productionOAuthEnabled: false;
+  remoteSandboxExecution: false;
 };
 
 export type GetSessionResponse = {

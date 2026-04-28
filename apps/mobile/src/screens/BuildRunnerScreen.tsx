@@ -7,7 +7,7 @@ import { useProject } from "@/project/ProjectContext";
 import { colors, spacing } from "@/theme";
 
 export function BuildRunnerScreen() {
-  const { runnerLogs, flowStatus, job, artifacts, runRunnerFlow, error } = useProject();
+  const { runnerLogs, flowStatus, job, artifacts, runRunnerFlow, error, runnerCapabilities } = useProject();
   const busy = flowStatus === "syncing" || flowStatus === "running";
 
   return (
@@ -16,6 +16,7 @@ export function BuildRunnerScreen() {
       <Screen>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           <StatusPill label={flowStatus} tone={flowStatus === "succeeded" ? "ready" : flowStatus === "failed" ? "danger" : busy ? "warning" : "muted"} />
+          <StatusPill label={`mode: ${job?.mode ?? runnerCapabilities?.activeMode ?? "unknown"}`} tone={job?.mode === "codex-app-server" ? "warning" : "muted"} />
           {job ? <StatusPill label={job.status} tone={job.status === "succeeded" ? "ready" : job.status === "failed" ? "danger" : "warning"} /> : null}
         </View>
 

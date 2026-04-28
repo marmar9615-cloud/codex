@@ -9,7 +9,7 @@ import { colors, spacing } from "@/theme";
 
 export function AgentChatScreen() {
   const router = useRouter();
-  const { chatMessages, flowStatus, runRunnerFlow, patch, error } = useProject();
+  const { chatMessages, flowStatus, runRunnerFlow, patch, error, job, runnerCapabilities } = useProject();
   const [draft, setDraft] = useState("Build/fix this sample project.");
   const busy = flowStatus === "syncing" || flowStatus === "running";
 
@@ -19,6 +19,7 @@ export function AgentChatScreen() {
       <Screen>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           <StatusPill label={flowStatus} tone={flowStatus === "succeeded" ? "ready" : flowStatus === "failed" ? "danger" : busy ? "warning" : "muted"} />
+          <StatusPill label={`runner: ${job?.mode ?? runnerCapabilities?.activeMode ?? "unknown"}`} tone={job?.mode === "codex-app-server" ? "warning" : "muted"} />
           {patch ? <StatusPill label="patch ready" tone="ready" /> : null}
         </View>
 

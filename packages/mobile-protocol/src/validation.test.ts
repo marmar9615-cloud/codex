@@ -7,6 +7,7 @@ import {
   assertPatchProposal,
   assertProjectSnapshot,
   assertRunnerError,
+  assertRunnerCapabilitiesResponse,
   assertRunnerJob,
   assertRunnerLogEvent,
   assertStartJobRequest,
@@ -74,6 +75,7 @@ test("validates runner job and log payloads", () => {
       sessionId: "mrs_0001",
       kind: "test",
       command: ["npm", "test"],
+      mode: "fake",
       status: "running",
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -92,6 +94,29 @@ test("validates runner job and log payloads", () => {
       createdAt: timestamp,
     }).message,
     "hello",
+  );
+});
+
+test("validates runner capabilities payloads", () => {
+  assert.deepEqual(
+    assertRunnerCapabilitiesResponse({
+      defaultMode: "fake",
+      activeMode: "codex-app-server",
+      fakeRunner: true,
+      codexAppServerBridge: true,
+      supportedTransports: ["stdio"],
+      productionOAuthEnabled: false,
+      remoteSandboxExecution: false,
+    }),
+    {
+      defaultMode: "fake",
+      activeMode: "codex-app-server",
+      fakeRunner: true,
+      codexAppServerBridge: true,
+      supportedTransports: ["stdio"],
+      productionOAuthEnabled: false,
+      remoteSandboxExecution: false,
+    },
   );
 });
 
@@ -180,5 +205,32 @@ test("rejects invalid runner payloads", () => {
         createdAt: timestamp,
       }),
     /unsupported artifact kind/,
+  );
+  assert.throws(
+    () =>
+      assertRunnerJob({
+        id: "mrj_0001",
+        sessionId: "mrs_0001",
+        kind: "test",
+        command: ["npm", "test"],
+        mode: "pretend-real",
+        status: "running",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    /unsupported runner mode/,
+  );
+  assert.throws(
+    () =>
+      assertRunnerCapabilitiesResponse({
+        defaultMode: "fake",
+        activeMode: "fake",
+        fakeRunner: true,
+        codexAppServerBridge: false,
+        supportedTransports: ["remote-ws"],
+        productionOAuthEnabled: false,
+        remoteSandboxExecution: false,
+      }),
+    /unsupported app-server transport/,
   );
 });

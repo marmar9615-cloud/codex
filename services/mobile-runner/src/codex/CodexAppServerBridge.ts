@@ -1,0 +1,233 @@
+import type { RunnerJobStatus, RunnerLogEvent } from "@codex/mobile-protocol";
+import type { AppServerTransport } from "@codex/mobile-protocol";
+import { AppServerProcessManager, CodexAppServerBridgeError } from "./AppServerProcessManager.js";
+import { mapAppServerNotification } from "./appServerEventMapper.js";
+import {
+  createJsonRpcNotification,
+  createJsonRpcRequest,
+  isJsonRpcNotification,
+  isJsonRpcRequest,
+  isJsonRpcResponseFor,
+  sanitizeForRunnerLog,
+} from "./jsonRpc.js";
+import type { JsonRpcMessage, JsonRpcResponse } from "./jsonRpc.js";
+
+export type CodexAppServerBridgeOptions = {
+  bin: string;
+  transport: AppServerTransport;
+  timeoutMs: number;
+  now: () => string;
+};
+
+export type CodexRunTurnOptions = {
+  sessionId: string;
+  jobId: string;
+  cwd: string;
+  prompt: string;
+  onLogEvent?: (event: RunnerLogEvent) => void;
+};
+
+export type CodexRunTurnResult = {
+  events: RunnerLogEvent[];
+  status: RunnerJobStatus;
+  appServerThreadId?: string;
+  appServerTurnId?: string;
+};
+
+export class CodexAppServerBridge {
+  private nextRequestId = 1;
+
+  constructor(private readonly options: CodexAppServerBridgeOptions) {}
+
+  async runTurn(run: CodexRunTurnOptions): Promise<CodexRunTurnResult> {
+    if (this.options.transport !== "stdio") {
+      throw new CodexAppServerBridgeError(
+        `mobile-runner supports only stdio app-server transport today, received: ${this.options.transport}`,
+        "codex_app_server_transport_unsupported",
+      );
+    }
+
+    const process = new AppServerProcessManager({
+      bin: this.options.bin,
+      timeoutMs: this.options.timeoutMs,
+    }).startStdio();
+
+    const events: RunnerLogEvent[] = [];
+    let sequence = 1;
+    let appServerThreadId: string | undefined;
+    let appServerTurnId: string | undefined;
+    let terminalStatus: RunnerJobStatus = "failed";
+    let completed = false;
+
+    const emit = (event: RunnerLogEvent) => {
+      events.push(event);
+      run.onLogEvent?.(event);
+    };
+    const emitSystem = (message: string) => {
+      emit({
+        type: "runner.log",
+        sessionId: run.sessionId,
+        jobId: run.jobId,
+        sequence: sequence++,
+        stream: "system",
+        level: "info",
+        message: sanitizeForRunnerLog(message),
+        createdAt: this.options.now(),
+      });
+    };
+    const handleMessage = (message: JsonRpcMessage) => {
+      if (isJsonRpcNotification(message)) {
+        const mapped = mapAppServerNotification(message, {
+          sessionId: run.sessionId,
+          jobId: run.jobId,
+          sequence: sequence++,
+          now: this.options.now,
+        });
+        if (mapped.appServerThreadId) {
+          appServerThreadId = mapped.appServerThreadId;
+        }
+        if (mapped.appServerTurnId) {
+          appServerTurnId = mapped.appServerTurnId;
+        }
+        if (mapped.status) {
+          terminalStatus = mapped.status;
+        }
+        if (mapped.completed) {
+          completed = true;
+        }
+        if (mapped.log) {
+          emit(mapped.log);
+        }
+        return;
+      }
+      if (isJsonRpcRequest(message)) {
+        process.write({
+          id: message.id,
+          error: {
+            code: -32601,
+            message: "mobile-runner does not grant app-server approval requests yet",
+          },
+        });
+        emit({
+          type: "runner.log",
+          sessionId: run.sessionId,
+          jobId: run.jobId,
+          sequence: sequence++,
+          stream: "stderr",
+          level: "warn",
+          message: `Codex app-server requested unsupported client method: ${sanitizeForRunnerLog(message.method)}`,
+          createdAt: this.options.now(),
+        });
+      }
+    };
+
+    try {
+      emitSystem("Starting Codex app-server bridge over stdio.");
+      await this.sendRequestAndWait(process, "initialize", {
+        clientInfo: {
+          name: "codex_mobile_runner",
+          title: "Codex Mobile Runner",
+          version: "0.1.0",
+        },
+        capabilities: {
+          experimentalApi: false,
+          optOutNotificationMethods: [],
+        },
+      }, handleMessage);
+      process.write(createJsonRpcNotification("initialized"));
+
+      const threadResponse = await this.sendRequestAndWait(
+        process,
+        "thread/start",
+        {
+          cwd: run.cwd,
+          approvalPolicy: "never",
+          sandbox: "workspace-write",
+          personality: "pragmatic",
+          serviceName: "codex_mobile_runner",
+          sessionStartSource: "startup",
+          ephemeral: true,
+        },
+        handleMessage,
+      );
+      appServerThreadId = extractNestedString(threadResponse.result, ["thread", "id"]) ?? appServerThreadId;
+      if (!appServerThreadId) {
+        throw new CodexAppServerBridgeError("thread/start response did not include a thread id", "codex_app_server_bad_response");
+      }
+
+      const turnResponse = await this.sendRequestAndWait(
+        process,
+        "turn/start",
+        {
+          threadId: appServerThreadId,
+          input: [{ type: "text", text: run.prompt, text_elements: [] }],
+          cwd: run.cwd,
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "workspaceWrite",
+            writableRoots: [run.cwd],
+            networkAccess: true,
+            excludeTmpdirEnvVar: false,
+            excludeSlashTmp: false,
+          },
+          personality: "pragmatic",
+        },
+        handleMessage,
+      );
+      appServerTurnId = extractNestedString(turnResponse.result, ["turn", "id"]) ?? appServerTurnId;
+      if (!appServerTurnId) {
+        throw new CodexAppServerBridgeError("turn/start response did not include a turn id", "codex_app_server_bad_response");
+      }
+
+      while (!completed) {
+        handleMessage(await process.readMessage());
+      }
+
+      return {
+        events,
+        status: terminalStatus,
+        appServerThreadId,
+        appServerTurnId,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown Codex app-server bridge error";
+      throw new CodexAppServerBridgeError(message, error instanceof CodexAppServerBridgeError ? error.code : "codex_app_server_bridge_error");
+    } finally {
+      process.close();
+    }
+  }
+
+  private async sendRequestAndWait(
+    process: { write(message: JsonRpcMessage): void; readMessage(): Promise<JsonRpcMessage> },
+    method: string,
+    params: unknown,
+    handleMessage: (message: JsonRpcMessage) => void,
+  ): Promise<JsonRpcResponse> {
+    const id = this.nextRequestId++;
+    process.write(createJsonRpcRequest(id, method, params));
+    while (true) {
+      const message = await process.readMessage();
+      if (isJsonRpcResponseFor(message, id)) {
+        if (message.error) {
+          throw new CodexAppServerBridgeError(
+            `codex app-server ${method} failed: ${message.error.message}`,
+            "codex_app_server_request_failed",
+          );
+        }
+        return message;
+      }
+      handleMessage(message);
+    }
+  }
+}
+
+function extractNestedString(value: unknown, path: string[]): string | undefined {
+  let cursor: unknown = value;
+  for (const segment of path) {
+    if (typeof cursor !== "object" || cursor === null || Array.isArray(cursor)) {
+      return undefined;
+    }
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  return typeof cursor === "string" && cursor.length > 0 ? cursor : undefined;
+}

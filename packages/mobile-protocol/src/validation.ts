@@ -1,5 +1,6 @@
 import type {
   BuildArtifact,
+  AppServerTransport,
   CreateSessionRequest,
   MobileSession,
   PatchFileChange,
@@ -11,9 +12,11 @@ import type {
   ReceivePatchRequest,
   RunnerError,
   RunnerEvent,
+  RunnerCapabilitiesResponse,
   RunnerJob,
   RunnerJobStatus,
   RunnerLogEvent,
+  RunnerMode,
   StartJobRequest,
   UploadSnapshotRequest,
 } from "./types.js";
@@ -29,6 +32,8 @@ const projectSourceKinds = new Set<ProjectSourceKind>([
 const commandKinds = new Set(["build", "test", "preview", "custom"]);
 const sessionStatuses = new Set(["created", "syncing", "ready", "running", "failed", "closed"]);
 const jobStatuses = new Set<RunnerJobStatus>(["queued", "running", "succeeded", "failed", "canceled"]);
+const runnerModes = new Set<RunnerMode>(["fake", "codex-app-server"]);
+const appServerTransports = new Set<AppServerTransport>(["stdio", "unix", "local-ws"]);
 const logStreams = new Set(["stdout", "stderr", "system"]);
 const logLevels = new Set(["debug", "info", "warn", "error"]);
 const artifactKinds = new Set(["webPreview", "testReport", "apk", "aab", "iosBuildLog", "other"]);
@@ -86,6 +91,7 @@ export function assertStartJobRequest(value: unknown): StartJobRequest {
   return {
     kind: kind as StartJobRequest["kind"],
     command: expectArray(object.command, "command").map((part, index) => expectString(part, `command[${index}]`)),
+    prompt: optionalString(object.prompt, "prompt"),
     cwd: optionalString(object.cwd, "cwd"),
     environmentId: optionalString(object.environmentId, "environmentId"),
   };
@@ -128,18 +134,44 @@ export function assertRunnerJob(value: unknown): RunnerJob {
   if (!commandKinds.has(kind)) {
     throw new ProtocolValidationError(`unsupported command kind: ${kind}`);
   }
+  const mode = expectString(object.mode, "mode");
+  if (!runnerModes.has(mode as RunnerMode)) {
+    throw new ProtocolValidationError(`unsupported runner mode: ${mode}`);
+  }
   const status = expectString(object.status, "status");
   if (!jobStatuses.has(status as RunnerJobStatus)) {
     throw new ProtocolValidationError(`unsupported job status: ${status}`);
   }
+  const appServerTransport = optionalAppServerTransport(object.appServerTransport, "appServerTransport");
   return {
     id: expectString(object.id, "id"),
     sessionId: expectString(object.sessionId, "sessionId"),
     kind: kind as RunnerJob["kind"],
     command: expectArray(object.command, "command").map((part, index) => expectString(part, `command[${index}]`)),
+    mode: mode as RunnerMode,
+    appServerThreadId: optionalString(object.appServerThreadId, "appServerThreadId"),
+    appServerTurnId: optionalString(object.appServerTurnId, "appServerTurnId"),
+    appServerTransport,
     status: status as RunnerJobStatus,
     createdAt: expectString(object.createdAt, "createdAt"),
     updatedAt: expectString(object.updatedAt, "updatedAt"),
+  };
+}
+
+export function assertRunnerCapabilitiesResponse(value: unknown): RunnerCapabilitiesResponse {
+  const object = expectRecord(value, "runner capabilities response");
+  const defaultMode = expectRunnerMode(object.defaultMode, "defaultMode");
+  const activeMode = expectRunnerMode(object.activeMode, "activeMode");
+  return {
+    defaultMode,
+    activeMode,
+    fakeRunner: expectLiteral(object.fakeRunner, true, "fakeRunner"),
+    codexAppServerBridge: expectBoolean(object.codexAppServerBridge, "codexAppServerBridge"),
+    supportedTransports: expectArray(object.supportedTransports, "supportedTransports").map((entry, index) =>
+      expectAppServerTransport(entry, `supportedTransports[${index}]`),
+    ),
+    productionOAuthEnabled: expectLiteral(object.productionOAuthEnabled, false, "productionOAuthEnabled"),
+    remoteSandboxExecution: expectLiteral(object.remoteSandboxExecution, false, "remoteSandboxExecution"),
   };
 }
 
@@ -312,11 +344,48 @@ function expectNumber(value: unknown, label: string): number {
   return value;
 }
 
+function expectBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new ProtocolValidationError(`${label} must be a boolean`);
+  }
+  return value;
+}
+
+function expectLiteral<T extends boolean>(value: unknown, expected: T, label: string): T {
+  if (value !== expected) {
+    throw new ProtocolValidationError(`${label} must be ${expected}`);
+  }
+  return expected;
+}
+
+function expectRunnerMode(value: unknown, label: string): RunnerMode {
+  const mode = expectString(value, label);
+  if (!runnerModes.has(mode as RunnerMode)) {
+    throw new ProtocolValidationError(`unsupported runner mode: ${mode}`);
+  }
+  return mode as RunnerMode;
+}
+
+function expectAppServerTransport(value: unknown, label: string): AppServerTransport {
+  const transport = expectString(value, label);
+  if (!appServerTransports.has(transport as AppServerTransport)) {
+    throw new ProtocolValidationError(`unsupported app-server transport: ${transport}`);
+  }
+  return transport as AppServerTransport;
+}
+
 function optionalString(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
   return expectString(value, label);
+}
+
+function optionalAppServerTransport(value: unknown, label: string): AppServerTransport | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return expectAppServerTransport(value, label);
 }
 
 function optionalStringArray(value: unknown, label: string): string[] | undefined {

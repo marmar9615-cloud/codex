@@ -1,7 +1,14 @@
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { applyUnifiedPatchToText, normalizeWorkspaceRelativePath } from "@codex/mobile-protocol";
-import type { BuildArtifact, MobileProject, MobileSession, PatchProposal, RunnerJob } from "@codex/mobile-protocol";
+import type {
+  BuildArtifact,
+  MobileProject,
+  MobileSession,
+  PatchProposal,
+  RunnerCapabilitiesResponse,
+  RunnerJob,
+} from "@codex/mobile-protocol";
 import { findWorkspaceTextFile, makeProjectSnapshot, sampleWorkspaceFiles, updateWorkspaceTextFile } from "@/file/sample-files";
 import type { WorkspaceTextFile } from "@/file/sample-files";
 import { createSampleWorkspaceProject } from "@/file/sample-workspace";
@@ -26,6 +33,7 @@ type ProjectContextValue = {
   job: RunnerJob | null;
   patch: PatchProposal | null;
   artifacts: BuildArtifact[];
+  runnerCapabilities: RunnerCapabilitiesResponse | null;
   runnerLogs: string[];
   chatMessages: ChatMessage[];
   flowStatus: RunnerFlowStatus;
@@ -37,6 +45,7 @@ type ProjectContextValue = {
   updateActiveFile(text: string): void;
   saveActiveFile(): Promise<void>;
   runRunnerFlow(prompt: string): Promise<RunnerFlowResult | null>;
+  refreshRunnerCapabilities(): Promise<void>;
   applyPatchDecision(accepted: boolean): Promise<void>;
   clearError(): void;
 };
@@ -63,6 +72,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [job, setJob] = useState<RunnerJob | null>(null);
   const [patch, setPatch] = useState<PatchProposal | null>(null);
   const [artifacts, setArtifacts] = useState<BuildArtifact[]>([]);
+  const [runnerCapabilities, setRunnerCapabilities] = useState<RunnerCapabilitiesResponse | null>(null);
   const [runnerLogs, setRunnerLogs] = useState<string[]>(["runner: idle"]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { role: "agent", text: "Open the sample project, edit files locally, then ask the remote runner for a fake build/fix pass." },
@@ -72,6 +82,20 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const activeFile = useMemo(() => findWorkspaceTextFile(files, activePath) ?? files[0] ?? null, [activePath, files]);
+
+  const refreshRunnerCapabilities = useCallback(async () => {
+    try {
+      setRunnerCapabilities(await runnerClient.getCapabilities());
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "unknown runner capabilities error";
+      setRunnerCapabilities(null);
+      setRunnerLogs((current) => [...current, `runner capabilities unavailable: ${message}`]);
+    }
+  }, [runnerClient]);
+
+  useEffect(() => {
+    void refreshRunnerCapabilities();
+  }, [refreshRunnerCapabilities]);
 
   const createSampleProject = useCallback(async (): Promise<MobileProject> => {
     setError(null);
@@ -132,6 +156,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       setChatMessages((current) => [...current, { role: "user", text: prompt }]);
 
       try {
+        await refreshRunnerCapabilities();
         const project = activeProject ?? (await createSampleProject());
         const snapshotFiles = files.length > 0 ? files : cloneSampleFiles();
         let currentSession = session;
@@ -157,9 +182,13 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         const started = await runnerClient.startJob(currentSession.id, {
           kind: "test",
           command: ["npm", "test"],
+          prompt,
         });
         setJob(started.job);
-        setChatMessages((current) => [...current, { role: "agent", text: "Remote runner job started." }]);
+        setChatMessages((current) => [
+          ...current,
+          { role: "agent", text: `Remote runner job started in ${started.job.mode} mode.` },
+        ]);
 
         const events = await runnerClient.streamJobLogs(currentSession.id, started.job.id, (event) => {
           if (event.type === "runner.log") {
@@ -197,7 +226,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         return null;
       }
     },
-    [activeProject, createSampleProject, files, runnerClient, session],
+    [activeProject, createSampleProject, files, refreshRunnerCapabilities, runnerClient, session],
   );
 
   const applyPatchDecision = useCallback(
@@ -254,6 +283,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       job,
       patch,
       artifacts,
+      runnerCapabilities,
       runnerLogs,
       chatMessages,
       flowStatus,
@@ -265,6 +295,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       updateActiveFile,
       saveActiveFile,
       runRunnerFlow,
+      refreshRunnerCapabilities,
       applyPatchDecision,
       clearError: () => setError(null),
     }),
@@ -278,6 +309,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       job,
       patch,
       artifacts,
+      runnerCapabilities,
       runnerLogs,
       chatMessages,
       flowStatus,
@@ -288,6 +320,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       updateActiveFile,
       saveActiveFile,
       runRunnerFlow,
+      refreshRunnerCapabilities,
       applyPatchDecision,
     ],
   );

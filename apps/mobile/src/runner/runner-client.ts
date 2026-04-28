@@ -4,6 +4,8 @@ import {
   assertMobileSession,
   assertPatchProposal,
   assertBuildArtifact,
+  assertRunnerCapabilitiesResponse,
+  assertRunnerError,
 } from "@codex/mobile-protocol";
 import type {
   ArtifactListResponse,
@@ -14,6 +16,7 @@ import type {
   GetPatchResponse,
   GetSessionResponse,
   PatchProposal,
+  RunnerCapabilitiesResponse,
   RunnerEvent,
   RunnerJob,
   StartJobRequest,
@@ -36,6 +39,10 @@ export class RunnerClientError extends Error {
 
 export class MobileRunnerClient {
   constructor(private readonly baseUrl = defaultRunnerBaseUrl) {}
+
+  async getCapabilities(): Promise<RunnerCapabilitiesResponse> {
+    return assertRunnerCapabilitiesResponse(await this.get<RunnerCapabilitiesResponse>("/capabilities"));
+  }
 
   async createSession(request: CreateSessionRequest): Promise<CreateSessionResponse> {
     const response = await this.post<CreateSessionResponse>("/sessions", request);
@@ -110,9 +117,18 @@ export class MobileRunnerClient {
       throw new RunnerClientError(`runner offline: ${message}`);
     }
     if (!response.ok) {
-      throw new RunnerClientError(`runner request failed: ${response.status}`, response.status);
+      throw new RunnerClientError(`runner request failed: ${response.status}: ${await readRunnerErrorMessage(response)}`, response.status);
     }
     return response;
+  }
+}
+
+async function readRunnerErrorMessage(response: Response): Promise<string> {
+  try {
+    const parsed = assertRunnerError(await response.json());
+    return parsed.code ? `${parsed.code}: ${parsed.error}` : parsed.error;
+  } catch {
+    return response.statusText || "unknown runner error";
   }
 }
 
