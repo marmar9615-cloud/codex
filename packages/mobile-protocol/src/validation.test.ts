@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertBuildArtifact,
+  assertBuildJobRequest,
+  assertBuildJobResult,
+  assertCommandPolicyViolation,
   assertCreateSessionRequest,
   assertMobileSession,
   assertPatchProposal,
@@ -11,6 +14,7 @@ import {
   assertRunnerEvent,
   assertRunnerJob,
   assertRunnerLogEvent,
+  assertSandboxError,
   assertStartJobRequest,
 } from "./validation.js";
 
@@ -77,6 +81,10 @@ test("validates runner job and log payloads", () => {
       kind: "test",
       command: ["npm", "test"],
       mode: "fake",
+      sandboxBackend: "fake",
+      sandboxCommandKind: "npm_test",
+      exitCode: 0,
+      durationMs: 412,
       status: "running",
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -99,6 +107,47 @@ test("validates runner job and log payloads", () => {
   );
 });
 
+test("validates sandbox build requests and results", () => {
+  assert.deepEqual(
+    assertBuildJobRequest({
+      commandKind: "pnpm_test",
+      packageManager: "pnpm",
+      workingDirectory: "packages/mobile-protocol",
+      artifactPaths: ["coverage"],
+    }),
+    {
+      commandKind: "pnpm_test",
+      packageManager: "pnpm",
+      workingDirectory: "packages/mobile-protocol",
+      artifactPaths: ["coverage"],
+      command: undefined,
+    },
+  );
+
+  assert.equal(
+    assertBuildJobResult({
+      sessionId: "mrs_0001",
+      jobId: "mrj_0001",
+      backend: "fake",
+      commandKind: "npm_test",
+      status: "succeeded",
+      exitCode: 0,
+      durationMs: 25,
+      artifacts: [
+        {
+          id: "mra_0001",
+          sessionId: "mrs_0001",
+          jobId: "mrj_0001",
+          kind: "testReport",
+          title: "Sandbox artifact",
+          createdAt: timestamp,
+        },
+      ],
+    }).backend,
+    "fake",
+  );
+});
+
 test("validates runner capabilities payloads", () => {
   assert.deepEqual(
     assertRunnerCapabilitiesResponse({
@@ -107,8 +156,17 @@ test("validates runner capabilities payloads", () => {
       fakeRunner: true,
       codexAppServerBridge: true,
       supportedTransports: ["stdio"],
+      sandboxBackends: ["fake", "local-docker"],
+      activeSandboxBackend: "fake",
+      commandKinds: ["npm_install", "npm_test", "npm_build"],
+      maxWorkspaceBytes: 52428800,
+      maxArtifactBytes: 10485760,
+      maxJobDurationMs: 120000,
+      maxLogBytes: 1048576,
+      unsafeCustomCommandsEnabled: false,
       productionOAuthEnabled: false,
       remoteSandboxExecution: false,
+      phoneSideExecution: false,
     }),
     {
       defaultMode: "fake",
@@ -116,8 +174,17 @@ test("validates runner capabilities payloads", () => {
       fakeRunner: true,
       codexAppServerBridge: true,
       supportedTransports: ["stdio"],
+      sandboxBackends: ["fake", "local-docker"],
+      activeSandboxBackend: "fake",
+      commandKinds: ["npm_install", "npm_test", "npm_build"],
+      maxWorkspaceBytes: 52428800,
+      maxArtifactBytes: 10485760,
+      maxJobDurationMs: 120000,
+      maxLogBytes: 1048576,
+      unsafeCustomCommandsEnabled: false,
       productionOAuthEnabled: false,
       remoteSandboxExecution: false,
+      phoneSideExecution: false,
     },
   );
 });
@@ -195,6 +262,18 @@ test("validates runner errors", () => {
     sessionId: undefined,
     jobId: undefined,
   });
+  assert.deepEqual(assertSandboxError({ error: "docker missing", code: "docker_missing", backend: "local-docker" }), {
+    error: "docker missing",
+    code: "docker_missing",
+    sessionId: undefined,
+    jobId: undefined,
+    backend: "local-docker",
+  });
+  assert.deepEqual(assertCommandPolicyViolation({ code: "raw_shell_disabled", message: "No shell", field: "command" }), {
+    code: "raw_shell_disabled",
+    message: "No shell",
+    field: "command",
+  });
 });
 
 test("rejects empty command", () => {
@@ -256,9 +335,33 @@ test("rejects invalid runner payloads", () => {
         fakeRunner: true,
         codexAppServerBridge: false,
         supportedTransports: ["remote-ws"],
+        sandboxBackends: ["fake"],
+        activeSandboxBackend: "fake",
+        commandKinds: ["npm_test"],
+        maxWorkspaceBytes: 52428800,
+        maxArtifactBytes: 10485760,
+        maxJobDurationMs: 120000,
+        maxLogBytes: 1048576,
+        unsafeCustomCommandsEnabled: false,
         productionOAuthEnabled: false,
         remoteSandboxExecution: false,
+        phoneSideExecution: false,
       }),
     /unsupported app-server transport/,
+  );
+  assert.throws(
+    () =>
+      assertBuildJobRequest({
+        commandKind: "curl_everything",
+      }),
+    /unsupported sandbox command kind/,
+  );
+  assert.throws(
+    () =>
+      assertBuildJobRequest({
+        commandKind: "npm_test",
+        command: "npm test",
+      }),
+    /command must be an array/,
   );
 });

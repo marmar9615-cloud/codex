@@ -115,10 +115,11 @@ export function SettingsAuthScreen() {
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
             <StatusPill label={`active: ${runnerCapabilities?.activeMode ?? "unknown"}`} tone={runnerCapabilities?.activeMode === "codex-app-server" ? "warning" : "muted"} />
             <StatusPill label={`job: ${job?.mode ?? "none"}`} tone={job?.mode === "codex-app-server" ? "warning" : "muted"} />
+            <StatusPill label={`sandbox: ${runnerCapabilities?.activeSandboxBackend ?? "unknown"}`} tone={runnerCapabilities?.remoteSandboxExecution ? "ready" : "warning"} />
             <StatusPill label={runnerCapabilities?.productionOAuthEnabled ? "oauth enabled" : "oauth gated"} tone="warning" />
           </View>
           <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
-            Supported bridge transports: {runnerCapabilities?.supportedTransports.join(", ") ?? "unavailable"}. Remote sandbox execution remains a later backend milestone.
+            Bridge transports: {runnerCapabilities?.supportedTransports.join(", ") ?? "unavailable"}. Sandbox backends: {runnerCapabilities?.sandboxBackends.join(", ") ?? "unavailable"}. Phone-side execution: no.
           </Text>
           <ActionButton onPress={() => void refreshRunnerCapabilities()}>Refresh Capabilities</ActionButton>
         </View>

@@ -67,14 +67,59 @@ test("runner client validates capabilities response", async () => {
           fakeRunner: true,
           codexAppServerBridge: true,
           supportedTransports: ["stdio"],
+          sandboxBackends: ["fake"],
+          activeSandboxBackend: "fake",
+          commandKinds: ["npm_install", "npm_test", "npm_build"],
+          maxWorkspaceBytes: 52428800,
+          maxArtifactBytes: 10485760,
+          maxJobDurationMs: 120000,
+          maxLogBytes: 1048576,
+          unsafeCustomCommandsEnabled: false,
           productionOAuthEnabled: false,
           remoteSandboxExecution: false,
+          phoneSideExecution: false,
         }),
         { status: 200 },
       );
     const capabilities = await new MobileRunnerClient("http://runner.invalid").getCapabilities();
     assert.equal(capabilities.activeMode, "codex-app-server");
     assert.deepEqual(capabilities.supportedTransports, ["stdio"]);
+    assert.equal(capabilities.activeSandboxBackend, "fake");
+    assert.deepEqual(capabilities.commandKinds, ["npm_install", "npm_test", "npm_build"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runner client starts sandbox build jobs", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (_input, init) => {
+      assert.equal(init?.method, "POST");
+      assert.match(String(init?.body), /npm_test/);
+      return new Response(
+        JSON.stringify({
+          job: {
+            id: "mrj_0001",
+            sessionId: "mrs_0001",
+            kind: "test",
+            command: ["sandbox", "npm_test"],
+            mode: "fake",
+            sandboxBackend: "fake",
+            sandboxCommandKind: "npm_test",
+            status: "queued",
+            createdAt: "2026-04-28T20:00:00.000Z",
+            updatedAt: "2026-04-28T20:00:00.000Z",
+          },
+          logStreamUrl: "/sessions/mrs_0001/jobs/mrj_0001/logs",
+        }),
+        { status: 202 },
+      );
+    };
+    const started = await new MobileRunnerClient("http://runner.invalid").startBuildJob("mrs_0001", "mrj_0001", {
+      commandKind: "npm_test",
+    });
+    assert.equal(started.job.sandboxCommandKind, "npm_test");
   } finally {
     globalThis.fetch = originalFetch;
   }

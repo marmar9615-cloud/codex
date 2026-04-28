@@ -9,6 +9,7 @@ Status: review-prep checklist. It is intentionally conservative.
 - Transport risk: do not expose `codex app-server` directly to a mobile device over an unauthenticated network listener. The runner bridge must stay server-side and prefer stdio/unix socket or authenticated localhost-only transport.
 - Patch risk: never apply agent-generated diffs automatically. Every app-server `turn/diff/updated` patch must be shown for user review, and unsupported or unsafe paths must block apply.
 - Approval risk: app-server approval requests must fail closed until the mobile app has an explicit approve/deny UI.
+- Sandbox risk: review notes must distinguish EAS builds of Codex Mobile from runner-side sandbox builds of user projects.
 - Auth risk: do not scrape ChatGPT, collect passwords, use cookies, or call private endpoints.
 - Privacy risk: disclose source snapshot uploads, logs, account data, and diagnostics if shipped.
 - Export compliance risk: answer encryption questions based on the actual shipped network/auth/storage behavior.
@@ -21,6 +22,7 @@ Status: review-prep checklist. It is intentionally conservative.
 - Data Safety risk: disclose runner uploads, logs, account data, and diagnostics if shipped.
 - Auth risk: keep production ChatGPT/Codex sign-in gated until officially supported.
 - Runner risk: keep heavy build/test execution and Codex app-server integration in the runner; the Android app remains a client using app storage plus SAF/user grants.
+- Sandbox risk: local Docker is a development backend only. Do not describe it as production cloud sandboxing.
 - Patch risk: require explicit user approval before applying agent patches, and keep path traversal checks in the shared protocol helper.
 - Metadata risk: store listing must not promise unavailable GitHub, auth, local terminal, or full filesystem features.
 
@@ -32,6 +34,8 @@ Status: review-prep checklist. It is intentionally conservative.
 - Generate review-note drafts that explain sandboxed remote execution and explicit patch approval.
 - Verify `RUNNER_MODE=fake` remains the safe default and `RUNNER_MODE=codex-app-server` is clearly developer-gated.
 - Verify app-server diffs are converted to reviewable `PatchProposal` objects and are never applied without an explicit user action.
+- Verify sandbox build/test actions use allowlisted command kinds and do not expose raw shell UI.
+- Verify artifact metadata uses sandbox-relative paths and does not expose runner host paths.
 
 ## What You Must Do Manually
 
@@ -55,3 +59,5 @@ Status: review-prep checklist. It is intentionally conservative.
 - A production-ready remote sandbox runner, until it exists and is tested.
 - Local execution capabilities that mobile OS rules do not permit.
 - Automatic approval of app-server command, write, network, or permission requests.
+- Direct Docker access from the phone or store metadata implying Docker runs on device.
+- Claims that EAS app-store builds and user-project sandbox builds are the same system.

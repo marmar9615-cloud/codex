@@ -1,6 +1,6 @@
 # Codex Mobile App Roadmap
 
-Status: MVP foundation, fake end-to-end runner flow, gated Codex app-server bridge, and app-server diff-to-patch review are implemented. Fake mode remains the default.
+Status: MVP foundation, fake end-to-end runner flow, gated Codex app-server bridge, app-server diff-to-patch review, and a first runner-side sandbox build/test backend are implemented. Fake modes remain the default.
 
 This roadmap designs a publishable iOS and Android Codex mobile app that feels like a mobile Codex CLI/TUI/Desktop client without pretending that a phone is an unrestricted developer workstation. The mobile app is a controller, editor, reviewer, and preview surface. Build and test execution belongs in a sandboxed remote runner.
 
@@ -59,10 +59,10 @@ flowchart TB
     SecureStore["Secure Storage<br/>iOS Keychain / Android Keystore"]
     Workspace["Mobile Workspace Layer<br/>App sandbox + picker grants"]
     Protocol["packages/mobile-protocol<br/>Typed REST/SSE messages"]
-    Runner["services/mobile-runner<br/>Sandbox runner API<br/>RUNNER_MODE=fake by default"]
+    Runner["services/mobile-runner<br/>Sandbox runner API<br/>RUNNER_MODE=fake<br/>SANDBOX_BACKEND=fake by default"]
     Bridge["CodexAppServerBridge<br/>runner-side stdio bridge"]
     CodexHost["Codex App-Server / Core<br/>runner-side only"]
-    Sandbox["Remote sandbox envs<br/>npm/cargo/python/gradle/Xcode CI"]
+    Sandbox["Sandbox backends<br/>fake + local Docker dev<br/>future cloud runner"]
     GitHub["GitHub / Git provider"]
     Artifacts["Artifacts<br/>logs, reports, preview URLs, APK/AAB, iOS logs"]
 
@@ -95,7 +95,8 @@ Runs on device:
 Runs in remote sandbox:
 
 - `npm`, `cargo`, `python`, `gradle`, and Xcode-related commands
-- Arbitrary generated shell commands
+- Allowlisted build/test/package-manager commands
+- Arbitrary generated shell commands only after future explicit approval and sandbox policy support
 - Git clone/fetch/push when credentials are delegated to the runner
 - Dependency installation
 - Test execution
@@ -112,6 +113,7 @@ Runs in remote sandbox:
 - The mobile app does not connect directly to `codex app-server`. The runner owns that local bridge and only exposes the mobile protocol over its own API.
 - App-server diffs are treated as patch proposals. They require explicit user review and approval before any workspace file is changed.
 - App-server approval requests fail closed until a first-class mobile approval UI exists.
+- Build/test commands run in runner-side sandbox backends. The local Docker adapter is for development only and does not make production cloud sandboxing complete.
 
 ## MVP Work Items
 
@@ -137,7 +139,8 @@ Phase 1: Real runner integration
 - Map app-server `turn/diff/updated` unified diffs into mobile `PatchProposal` review models. Done for modified, added, deleted, empty, and unsupported text diff cases.
 - Add project snapshot upload and incremental file sync.
 - Add interactive mobile approval UI for app-server command/write/network/permission requests. Not done; current bridge fails closed and never auto-approves.
-- Add real remote sandbox build/test backend. Not done; this is the next build milestone.
+- Add first runner-side sandbox build/test backend. Done for `SANDBOX_BACKEND=fake` and opt-in local-development `SANDBOX_BACKEND=local-docker`.
+- Add production cloud sandbox build/test backend. Not done; local Docker is not production infrastructure.
 
 Phase 2: GitHub and project lifecycle
 
@@ -232,7 +235,7 @@ pnpm --filter @codex/mobile-runner dev
 pnpm --filter @codex/mobile start
 ```
 
-The runner currently streams fake logs and returns fake artifact metadata. The mobile app currently renders working navigation and placeholder flows over local sample data.
+The runner streams deterministic fake logs by default and can stream real local Docker sandbox logs when `SANDBOX_BACKEND=local-docker` is enabled. The mobile app renders working navigation and sample project flows over local app-workspace data.
 
 Milestone 4 also supports a gated real Codex app-server patch-review path. When `RUNNER_MODE=codex-app-server` emits `turn/diff/updated`, the runner parses the aggregated unified diff into a mobile `PatchProposal`. The app displays it in `DiffReviewScreen`, blocks unsupported changes, and applies supported text patches only after the user taps apply. Approval requests from app-server currently fail closed instead of auto-approving.
 
@@ -247,6 +250,19 @@ pnpm --filter @codex/mobile-runner dev
 
 If the Codex binary cannot start or the bridge cannot initialize, the runner returns a structured error instead of pretending the fake runner is real Codex. Normal mobile testing should continue to use the default `RUNNER_MODE=fake` until remote sandbox infrastructure and supported production ChatGPT/Codex mobile auth are confirmed.
 
+To try the local Docker sandbox backend for development:
+
+```bash
+SANDBOX_BACKEND=local-docker \
+SANDBOX_DOCKER_IMAGE=node:22-bookworm-slim \
+SANDBOX_DOCKER_NETWORK=none \
+pnpm --filter @codex/mobile-runner dev
+```
+
+The mobile `BuildRunnerScreen` can start safe build/test actions such as install dependencies, run tests, and build project. The runner maps those actions to allowlisted command kinds and streams real Docker logs when the local Docker backend is enabled. It does not expose Docker to the phone, does not run privileged containers, does not mount host secrets, and does not accept raw shell commands unless the explicit dev-only `ENABLE_UNSAFE_CUSTOM_COMMANDS=1` flag is set.
+
+EAS builds Codex Mobile itself for TestFlight and Google Play. The sandbox backend runs users' project build/test commands in runner environments. They are separate systems.
+
 ## Next Milestone
 
-The next real build step is a remote sandbox build/test backend. It should run commands inside contained runner environments, stream logs and artifacts through the existing mobile protocol, and keep phone-side execution limited to safe app-contained editing, preview, and user-approved patch application.
+The next real build step is production cloud sandbox infrastructure. It should replace the local Docker development adapter with isolated multi-user runner environments, authenticated job dispatch, durable artifact storage, quotas, audit logs, and cleanup, while keeping phone-side execution limited to safe app-contained editing, preview, and user-approved patch application.

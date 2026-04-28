@@ -9,6 +9,7 @@ import {
 } from "@codex/mobile-protocol";
 import type {
   ArtifactListResponse,
+  BuildJobRequest,
   BuildArtifact,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -19,6 +20,7 @@ import type {
   RunnerCapabilitiesResponse,
   RunnerEvent,
   RunnerJob,
+  StartBuildJobResponse,
   StartJobRequest,
   StartJobResponse,
   UploadSnapshotRequest,
@@ -60,6 +62,11 @@ export class MobileRunnerClient {
 
   async startJob(sessionId: string, request: StartJobRequest): Promise<StartJobResponse> {
     const response = await this.post<StartJobResponse>(`/sessions/${sessionId}/jobs`, request);
+    return { job: assertRunnerJob(response.job), logStreamUrl: response.logStreamUrl };
+  }
+
+  async startBuildJob(sessionId: string, jobId: string, request: BuildJobRequest): Promise<StartBuildJobResponse> {
+    const response = await this.post<StartBuildJobResponse>(`/sessions/${sessionId}/jobs/${jobId}/builds`, request);
     return { job: assertRunnerJob(response.job), logStreamUrl: response.logStreamUrl };
   }
 

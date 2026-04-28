@@ -59,7 +59,9 @@ Status: planning and configuration prep only. Do not upload, submit, or modify r
 
 ## Review Notes Draft
 
-Codex Mobile is a mobile coding-agent IDE. Users edit project files inside the app workspace or import files they choose through supported document flows. Agent patches are shown for review, and users approve or reject changes before they are applied. Heavy build and test commands run in a remote sandbox runner; the app does not execute arbitrary downloaded code locally on iPhone. ChatGPT/Codex sign-in is either implemented through an officially supported public mobile auth flow or disabled behind a feature flag.
+Codex Mobile is a mobile coding-agent IDE. Users edit project files inside the app workspace or import files they choose through supported document flows. Agent patches are shown for review, and users approve or reject changes before they are applied. Heavy build and test commands run in runner-side sandbox environments; the app does not execute arbitrary downloaded code locally on iPhone. ChatGPT/Codex sign-in is either implemented through an officially supported public mobile auth flow or disabled behind a feature flag.
+
+Important distinction: EAS Build creates Codex Mobile's own iOS app binary for TestFlight/App Store distribution. The mobile runner sandbox runs users' project build/test commands outside the phone. These are separate systems.
 
 ## EAS Build And TestFlight Commands
 
@@ -71,6 +73,8 @@ pnpm dlx eas-cli@latest submit -p ios --profile production
 ```
 
 The submit command prepares App Store Connect/TestFlight upload through EAS Submit. It must not be run until the App Store Connect app record, Apple credentials, and placeholder replacement are complete.
+
+The local Docker sandbox backend is for developer testing of user-project jobs only. It is not an App Store build mechanism and must not be described as iPhone-side execution.
 
 ## Final Codex Release Prompt
 

@@ -1,8 +1,12 @@
 import type {
   BuildArtifact,
   AppServerTransport,
+  BuildJobRequest,
+  BuildJobResult,
+  CommandPolicyViolation,
   CreateSessionRequest,
   MobileSession,
+  PackageManager,
   PatchFileChange,
   PatchHunk,
   PatchLine,
@@ -21,6 +25,9 @@ import type {
   RunnerJobStatus,
   RunnerLogEvent,
   RunnerMode,
+  SandboxBackend,
+  SandboxCommandKind,
+  SandboxError,
   StartJobRequest,
   UploadSnapshotRequest,
 } from "./types.js";
@@ -47,6 +54,21 @@ const jobStatuses = new Set<RunnerJobStatus>([
 ]);
 const runnerModes = new Set<RunnerMode>(["fake", "codex-app-server"]);
 const appServerTransports = new Set<AppServerTransport>(["stdio", "unix", "local-ws"]);
+const sandboxBackends = new Set<SandboxBackend>(["fake", "local-docker"]);
+const sandboxCommandKinds = new Set<SandboxCommandKind>([
+  "npm_install",
+  "npm_test",
+  "npm_build",
+  "pnpm_install",
+  "pnpm_test",
+  "pnpm_build",
+  "yarn_install",
+  "yarn_test",
+  "yarn_build",
+  "expo_export_or_check",
+  "custom",
+]);
+const packageManagers = new Set<PackageManager>(["npm", "pnpm", "yarn"]);
 const logStreams = new Set(["stdout", "stderr", "system"]);
 const logLevels = new Set(["debug", "info", "warn", "error"]);
 const logCategories = new Set<RunnerEventCategory>(["agentText", "plan", "diff", "approval", "tool", "error", "completion", "system"]);
@@ -55,6 +77,13 @@ const patchLineKinds = new Set(["context", "add", "remove"]);
 const patchFileChangeKinds = new Set<PatchFileChangeKind>(["added", "modified", "deleted", "unsupported"]);
 const patchSources = new Set<PatchSource>(["fake", "codex-app-server"]);
 const patchLifecycleStatuses = new Set<PatchLifecycleStatus>(["none", "available", "unsupported", "applied", "rejected", "failedToApply"]);
+const commandPolicyViolationCodes = new Set<CommandPolicyViolation["code"]>([
+  "command_rejected_by_policy",
+  "raw_shell_disabled",
+  "working_directory_rejected",
+  "artifact_path_rejected",
+  "unsafe_custom_command_disabled",
+]);
 
 export class ProtocolValidationError extends Error {
   constructor(message: string) {
@@ -114,6 +143,22 @@ export function assertStartJobRequest(value: unknown): StartJobRequest {
   };
 }
 
+export function assertBuildJobRequest(value: unknown): BuildJobRequest {
+  const object = expectRecord(value, "build job request");
+  const commandKind = expectSandboxCommandKind(object.commandKind, "commandKind");
+  const command =
+    object.command === undefined || object.command === null
+      ? undefined
+      : expectArray(object.command, "command").map((part, index) => expectString(part, `command[${index}]`));
+  return {
+    commandKind,
+    packageManager: optionalPackageManager(object.packageManager, "packageManager"),
+    workingDirectory: optionalString(object.workingDirectory, "workingDirectory"),
+    artifactPaths: optionalStringArray(object.artifactPaths, "artifactPaths"),
+    command,
+  };
+}
+
 export function assertReceivePatchRequest(value: unknown): ReceivePatchRequest {
   const object = expectRecord(value, "receive patch request");
   return {
@@ -166,6 +211,10 @@ export function assertRunnerJob(value: unknown): RunnerJob {
     kind: kind as RunnerJob["kind"],
     command: expectArray(object.command, "command").map((part, index) => expectString(part, `command[${index}]`)),
     mode: mode as RunnerMode,
+    sandboxBackend: optionalSandboxBackend(object.sandboxBackend, "sandboxBackend"),
+    sandboxCommandKind: optionalSandboxCommandKind(object.sandboxCommandKind, "sandboxCommandKind"),
+    exitCode: optionalNumber(object.exitCode, "exitCode"),
+    durationMs: optionalNumber(object.durationMs, "durationMs"),
     appServerThreadId: optionalString(object.appServerThreadId, "appServerThreadId"),
     appServerTurnId: optionalString(object.appServerTurnId, "appServerTurnId"),
     appServerTransport,
@@ -187,8 +236,17 @@ export function assertRunnerCapabilitiesResponse(value: unknown): RunnerCapabili
     supportedTransports: expectArray(object.supportedTransports, "supportedTransports").map((entry, index) =>
       expectAppServerTransport(entry, `supportedTransports[${index}]`),
     ),
+    sandboxBackends: expectArray(object.sandboxBackends, "sandboxBackends").map((entry, index) => expectSandboxBackend(entry, `sandboxBackends[${index}]`)),
+    activeSandboxBackend: expectSandboxBackend(object.activeSandboxBackend, "activeSandboxBackend"),
+    commandKinds: expectArray(object.commandKinds, "commandKinds").map((entry, index) => expectSandboxCommandKind(entry, `commandKinds[${index}]`)),
+    maxWorkspaceBytes: expectNumber(object.maxWorkspaceBytes, "maxWorkspaceBytes"),
+    maxArtifactBytes: expectNumber(object.maxArtifactBytes, "maxArtifactBytes"),
+    maxJobDurationMs: expectNumber(object.maxJobDurationMs, "maxJobDurationMs"),
+    maxLogBytes: expectNumber(object.maxLogBytes, "maxLogBytes"),
+    unsafeCustomCommandsEnabled: expectBoolean(object.unsafeCustomCommandsEnabled, "unsafeCustomCommandsEnabled"),
     productionOAuthEnabled: expectLiteral(object.productionOAuthEnabled, false, "productionOAuthEnabled"),
-    remoteSandboxExecution: expectLiteral(object.remoteSandboxExecution, false, "remoteSandboxExecution"),
+    remoteSandboxExecution: expectBoolean(object.remoteSandboxExecution, "remoteSandboxExecution"),
+    phoneSideExecution: expectLiteral(object.phoneSideExecution, false, "phoneSideExecution"),
   };
 }
 
@@ -267,6 +325,48 @@ export function assertRunnerError(value: unknown): RunnerError {
     code: optionalString(object.code, "code"),
     sessionId: optionalString(object.sessionId, "sessionId"),
     jobId: optionalString(object.jobId, "jobId"),
+  };
+}
+
+export function assertSandboxError(value: unknown): SandboxError {
+  const object = expectRecord(value, "sandbox error");
+  return {
+    error: expectString(object.error, "error"),
+    code: optionalString(object.code, "code"),
+    sessionId: optionalString(object.sessionId, "sessionId"),
+    jobId: optionalString(object.jobId, "jobId"),
+    backend: optionalSandboxBackend(object.backend, "backend"),
+  };
+}
+
+export function assertCommandPolicyViolation(value: unknown): CommandPolicyViolation {
+  const object = expectRecord(value, "command policy violation");
+  const code = expectString(object.code, "code");
+  if (!commandPolicyViolationCodes.has(code as CommandPolicyViolation["code"])) {
+    throw new ProtocolValidationError(`unsupported command policy violation code: ${code}`);
+  }
+  return {
+    code: code as CommandPolicyViolation["code"],
+    message: expectString(object.message, "message"),
+    field: optionalString(object.field, "field"),
+  };
+}
+
+export function assertBuildJobResult(value: unknown): BuildJobResult {
+  const object = expectRecord(value, "build job result");
+  const status = expectString(object.status, "status");
+  if (!jobStatuses.has(status as RunnerJobStatus)) {
+    throw new ProtocolValidationError(`unsupported job status: ${status}`);
+  }
+  return {
+    sessionId: expectString(object.sessionId, "sessionId"),
+    jobId: expectString(object.jobId, "jobId"),
+    backend: expectSandboxBackend(object.backend, "backend"),
+    commandKind: expectSandboxCommandKind(object.commandKind, "commandKind"),
+    status: status as RunnerJobStatus,
+    exitCode: optionalNumber(object.exitCode, "exitCode"),
+    durationMs: expectNumber(object.durationMs, "durationMs"),
+    artifacts: expectArray(object.artifacts, "artifacts").map(assertBuildArtifact),
   };
 }
 
@@ -429,6 +529,33 @@ function expectAppServerTransport(value: unknown, label: string): AppServerTrans
   return transport as AppServerTransport;
 }
 
+function expectSandboxBackend(value: unknown, label: string): SandboxBackend {
+  const backend = expectString(value, label);
+  if (!sandboxBackends.has(backend as SandboxBackend)) {
+    throw new ProtocolValidationError(`unsupported sandbox backend: ${backend}`);
+  }
+  return backend as SandboxBackend;
+}
+
+function expectSandboxCommandKind(value: unknown, label: string): SandboxCommandKind {
+  const commandKind = expectString(value, label);
+  if (!sandboxCommandKinds.has(commandKind as SandboxCommandKind)) {
+    throw new ProtocolValidationError(`unsupported sandbox command kind: ${commandKind}`);
+  }
+  return commandKind as SandboxCommandKind;
+}
+
+function optionalPackageManager(value: unknown, label: string): PackageManager | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const packageManager = expectString(value, label);
+  if (!packageManagers.has(packageManager as PackageManager)) {
+    throw new ProtocolValidationError(`unsupported package manager: ${packageManager}`);
+  }
+  return packageManager as PackageManager;
+}
+
 function optionalString(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
@@ -502,6 +629,20 @@ function optionalAppServerTransport(value: unknown, label: string): AppServerTra
     return undefined;
   }
   return expectAppServerTransport(value, label);
+}
+
+function optionalSandboxBackend(value: unknown, label: string): SandboxBackend | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return expectSandboxBackend(value, label);
+}
+
+function optionalSandboxCommandKind(value: unknown, label: string): SandboxCommandKind | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return expectSandboxCommandKind(value, label);
 }
 
 function optionalStringArray(value: unknown, label: string): string[] | undefined {

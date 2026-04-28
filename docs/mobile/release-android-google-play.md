@@ -56,7 +56,9 @@ Status: planning and configuration prep only. Do not upload, submit, or modify r
 
 ## Review Notes Draft
 
-Codex Mobile uses app-specific storage by default and user-selected files/folders through supported Android document access flows. The app does not request broad all-files access by default. Users review and approve every agent patch before workspace files are changed. Heavy builds, tests, package installation, and arbitrary shell commands run in a remote sandbox runner rather than on the phone.
+Codex Mobile uses app-specific storage by default and user-selected files/folders through supported Android document access flows. The app does not request broad all-files access by default. Users review and approve every agent patch before workspace files are changed. Heavy builds, tests, and package installation run in runner-side sandbox environments rather than on the phone. Raw arbitrary shell commands are disabled by default.
+
+Important distinction: EAS Build creates Codex Mobile's own Android App Bundle for Google Play. The mobile runner sandbox runs users' project build/test commands outside the phone. These are separate systems.
 
 ## EAS Build And Internal Testing Commands
 
@@ -68,3 +70,5 @@ pnpm dlx eas-cli@latest submit -p android --profile production
 ```
 
 The production build profile produces an AAB. The submit profile targets the Play internal track as a draft-style first step. Do not run submit until the Play Console app, package name, service account, and Data Safety plan are ready.
+
+The local Docker sandbox backend is for developer testing of user-project jobs only. It is not a Google Play build mechanism and must not be described as Android phone-side execution.

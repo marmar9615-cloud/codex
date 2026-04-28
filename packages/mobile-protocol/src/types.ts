@@ -80,12 +80,50 @@ export type RunnerMode = "fake" | "codex-app-server";
 
 export type AppServerTransport = "stdio" | "unix" | "local-ws";
 
+export type SandboxBackend = "fake" | "local-docker";
+
+export type SandboxCommandKind =
+  | "npm_install"
+  | "npm_test"
+  | "npm_build"
+  | "pnpm_install"
+  | "pnpm_test"
+  | "pnpm_build"
+  | "yarn_install"
+  | "yarn_test"
+  | "yarn_build"
+  | "expo_export_or_check"
+  | "custom";
+
+export type CommandKind = SandboxCommandKind;
+
+export type PackageManager = "npm" | "pnpm" | "yarn";
+
+export type ResourceLimits = {
+  maxWorkspaceBytes: number;
+  maxArtifactBytes: number;
+  maxJobDurationMs: number;
+  maxLogBytes: number;
+};
+
+export type SandboxCapabilities = ResourceLimits & {
+  sandboxBackends: SandboxBackend[];
+  activeSandboxBackend: SandboxBackend;
+  commandKinds: SandboxCommandKind[];
+  unsafeCustomCommandsEnabled: boolean;
+  phoneSideExecution: false;
+};
+
 export type RunnerJob = {
   id: string;
   sessionId: string;
   kind: RunnerCommandKind;
   command: string[];
   mode: RunnerMode;
+  sandboxBackend?: SandboxBackend;
+  sandboxCommandKind?: SandboxCommandKind;
+  exitCode?: number;
+  durationMs?: number;
   appServerThreadId?: string;
   appServerTurnId?: string;
   appServerTransport?: AppServerTransport;
@@ -97,6 +135,51 @@ export type RunnerJob = {
 export type StartJobResponse = {
   job: RunnerJob;
   logStreamUrl: string;
+};
+
+export type BuildJobRequest = {
+  commandKind: SandboxCommandKind;
+  packageManager?: PackageManager;
+  workingDirectory?: string;
+  artifactPaths?: string[];
+  command?: string[];
+};
+
+export type BuildJobResult = {
+  sessionId: string;
+  jobId: string;
+  backend: SandboxBackend;
+  commandKind: SandboxCommandKind;
+  status: RunnerJobStatus;
+  exitCode?: number;
+  durationMs: number;
+  artifacts: BuildArtifact[];
+};
+
+export type StartBuildJobResponse = {
+  job: RunnerJob;
+  logStreamUrl: string;
+};
+
+export type SandboxLogEvent = RunnerLogEvent & {
+  sandboxBackend?: SandboxBackend;
+};
+
+export type SandboxArtifact = BuildArtifact;
+
+export type SandboxError = RunnerError & {
+  backend?: SandboxBackend;
+};
+
+export type CommandPolicyViolation = {
+  code:
+    | "command_rejected_by_policy"
+    | "raw_shell_disabled"
+    | "working_directory_rejected"
+    | "artifact_path_rejected"
+    | "unsafe_custom_command_disabled";
+  message: string;
+  field?: string;
 };
 
 export type RunnerLogLevel = "debug" | "info" | "warn" | "error";
@@ -248,8 +331,17 @@ export type RunnerCapabilitiesResponse = {
   fakeRunner: true;
   codexAppServerBridge: boolean;
   supportedTransports: AppServerTransport[];
+  sandboxBackends: SandboxBackend[];
+  activeSandboxBackend: SandboxBackend;
+  commandKinds: SandboxCommandKind[];
+  maxWorkspaceBytes: number;
+  maxArtifactBytes: number;
+  maxJobDurationMs: number;
+  maxLogBytes: number;
+  unsafeCustomCommandsEnabled: boolean;
   productionOAuthEnabled: false;
-  remoteSandboxExecution: false;
+  remoteSandboxExecution: boolean;
+  phoneSideExecution: false;
 };
 
 export type GetSessionResponse = {

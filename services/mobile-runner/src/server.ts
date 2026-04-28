@@ -1,5 +1,7 @@
 import {
   assertBuildArtifact,
+  assertBuildJobRequest,
+  assertBuildJobResult,
   assertCreateSessionRequest,
   assertPatchProposal,
   assertReceivePatchRequest,
@@ -12,6 +14,8 @@ import {
 } from "@codex/mobile-protocol";
 import type {
   ArtifactListResponse,
+  BuildJobRequest,
+  BuildJobResult,
   BuildArtifact,
   CreateSessionResponse,
   GetJobResponse,
@@ -25,6 +29,8 @@ import type {
   RunnerError,
   RunnerJob,
   RunnerLogEvent,
+  SandboxCommandKind,
+  StartBuildJobResponse,
   StartJobResponse,
   UploadSnapshotResponse,
 } from "@codex/mobile-protocol";
@@ -37,9 +43,17 @@ import { CodexAppServerBridgeError } from "./codex/AppServerProcessManager.js";
 import {
   capabilitiesFromConfig,
   getCodexBridgePreflightError,
+  getSandboxPreflightError,
   loadMobileRunnerConfig,
 } from "./config.js";
 import type { MobileRunnerConfig } from "./config.js";
+import { sanitizeForRunnerLog } from "./codex/jsonRpc.js";
+import { FakeSandboxBackend } from "./sandbox/FakeSandboxBackend.js";
+import { LocalDockerSandboxBackend } from "./sandbox/LocalDockerSandboxBackend.js";
+import { resolveSandboxCommand } from "./sandbox/SandboxCommandPolicy.js";
+import { SandboxBackendError } from "./sandbox/SandboxBackend.js";
+import type { ResolvedSandboxCommand } from "./sandbox/SandboxCommandPolicy.js";
+import type { SandboxBackend, SandboxCommandSpec } from "./sandbox/SandboxBackend.js";
 
 type ServerState = {
   sessions: Map<string, MobileSession>;
@@ -49,6 +63,8 @@ type ServerState = {
   patches: Map<string, PatchProposal>;
   workspaces: Map<string, string>;
   jobPrompts: Map<string, string>;
+  sandboxBuildRequests: Map<string, ResolvedSandboxCommand>;
+  sandboxBuildResults: Map<string, BuildJobResult>;
   config: MobileRunnerConfig;
   nextSession: number;
   nextJob: number;
@@ -77,6 +93,8 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
     patches: new Map(),
     workspaces: new Map(),
     jobPrompts: new Map(),
+    sandboxBuildRequests: new Map(),
+    sandboxBuildResults: new Map(),
     config,
     nextSession: 1,
     nextJob: 1,
@@ -88,8 +106,8 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
     try {
       await routeRequest(request, response, state, now);
     } catch (error) {
-      const status = error instanceof HttpError ? error.status : 500;
-      const code = error instanceof HttpError ? error.code : "runner_error";
+      const status = error instanceof HttpError ? error.status : error instanceof SandboxBackendError ? error.status : 500;
+      const code = error instanceof HttpError ? error.code : error instanceof SandboxBackendError ? error.code : "runner_error";
       const message = error instanceof Error ? error.message : "unknown runner error";
       writeJson<RunnerError>(response, status, {
         error: message,
@@ -163,7 +181,7 @@ async function routeRequest(
     const sessionId = snapshotMatch?.[1] ?? legacySnapshotMatch?.[1] ?? "";
     const session = requireSession(state, sessionId);
     const params = assertUploadSnapshotRequest(await readJson(request));
-    validateSnapshotPaths(params);
+    validateSnapshotPaths(params, state.config.resourceLimits.maxWorkspaceBytes);
     await materializeSnapshot(await ensureSessionWorkspace(state, session.id), params);
     state.snapshots.set(session.id, params);
     const updated = {
@@ -220,11 +238,38 @@ async function routeRequest(
     return;
   }
 
+  const buildMatch = /^\/sessions\/([^/]+)\/jobs\/([^/]+)\/builds$/.exec(path);
+  if (request.method === "POST" && buildMatch) {
+    const session = requireSession(state, buildMatch[1] ?? "");
+    const job = requireJob(state, buildMatch[2] ?? "", session.id);
+    const requestBody = assertBuildJobRequest(await readJson(request));
+    const preflightError = getSandboxPreflightError(state.config);
+    if (preflightError) {
+      throw new HttpError(503, "sandbox_backend_unavailable", preflightError, session.id, job.id);
+    }
+    const resolved = resolveBuildRequest(requestBody, state.config);
+    state.sandboxBuildRequests.set(job.id, resolved);
+    const updated = assertRunnerJob({
+      ...job,
+      sandboxBackend: state.config.sandboxBackend,
+      sandboxCommandKind: resolved.commandKind,
+      updatedAt: now(),
+    });
+    state.jobs.set(job.id, updated);
+    writeJson<StartBuildJobResponse>(response, 202, {
+      job: updated,
+      logStreamUrl: `/sessions/${session.id}/jobs/${job.id}/logs`,
+    });
+    return;
+  }
+
   const logsMatch = /^\/sessions\/([^/]+)\/jobs\/([^/]+)\/logs$/.exec(path);
   if (request.method === "GET" && logsMatch) {
     const session = requireSession(state, logsMatch[1] ?? "");
     const job = requireJob(state, logsMatch[2] ?? "", session.id);
-    if (job.mode === "codex-app-server") {
+    if (state.sandboxBuildRequests.has(job.id)) {
+      await streamSandboxBuildLogs(response, state, session, job, now);
+    } else if (job.mode === "codex-app-server") {
       await streamCodexAppServerLogs(response, state, session, job, now);
     } else {
       await streamFakeLogs(response, state, session, job, now);
@@ -333,6 +378,110 @@ async function streamFakeLogs(
   response.write("event: jobStatus\n");
   response.write(`data: ${JSON.stringify({ type: "runner.jobStatus", sessionId: session.id, job: completed })}\n\n`);
   response.end();
+}
+
+async function streamSandboxBuildLogs(
+  response: http.ServerResponse,
+  state: ServerState,
+  session: MobileSession,
+  job: RunnerJob,
+  now: () => string,
+): Promise<void> {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  });
+
+  const request = state.sandboxBuildRequests.get(job.id);
+  if (!request) {
+    throw new HttpError(404, "build_request_not_found", `unknown build request for job: ${job.id}`, session.id, job.id);
+  }
+
+  const running = assertRunnerJob({
+    ...job,
+    status: "running",
+    sandboxBackend: state.config.sandboxBackend,
+    sandboxCommandKind: request.commandKind,
+    updatedAt: now(),
+  });
+  state.jobs.set(job.id, running);
+
+  let sequence = 0;
+  const backend = createSandboxBackend(state.config);
+  try {
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    const spec: SandboxCommandSpec = {
+      sessionId: session.id,
+      jobId: job.id,
+      workspaceRoot,
+      backend: state.config.sandboxBackend,
+      commandKind: request.commandKind,
+      command: request.command,
+      workingDirectory: request.workingDirectory,
+      artifactPaths: request.artifactPaths,
+      timeoutMs: request.timeoutMs,
+      maxWorkspaceBytes: state.config.resourceLimits.maxWorkspaceBytes,
+      maxLogBytes: request.maxLogBytes,
+      maxArtifactBytes: request.maxArtifactBytes,
+      networkMode: request.networkMode,
+      createdAt: now(),
+    };
+    const result = assertBuildJobResult(
+      await backend.runCommand(spec, {
+        now,
+        nextSequence: () => {
+          sequence += 1;
+          return sequence;
+        },
+        nextArtifactId: () => formatId("mra", state.nextArtifact++),
+        onLog: (event) => writeSse(response, "log", event),
+      }),
+    );
+    state.sandboxBuildResults.set(job.id, result);
+    for (const artifact of result.artifacts) {
+      appendArtifact(state, session.id, artifact);
+      writeSse(response, "artifact", { type: "runner.artifact", sessionId: session.id, artifact });
+    }
+    const completed = assertRunnerJob({
+      ...running,
+      status: result.status,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      updatedAt: now(),
+    });
+    state.jobs.set(job.id, completed);
+    state.sessions.set(session.id, { ...session, status: completed.status === "succeeded" ? "ready" : "failed", updatedAt: completed.updatedAt });
+    writeSse(response, "jobStatus", { type: "runner.jobStatus", sessionId: session.id, job: completed });
+  } catch (caught) {
+    const code = caught instanceof SandboxBackendError ? caught.code : "sandbox_backend_unavailable";
+    const status = caught instanceof SandboxBackendError ? caught.status : 500;
+    const message = caught instanceof Error ? caught.message : "unknown sandbox backend failure";
+    const failed = assertRunnerJob({
+      ...running,
+      status: "failed",
+      sandboxBackend: state.config.sandboxBackend,
+      sandboxCommandKind: request.commandKind,
+      updatedAt: now(),
+    });
+    state.jobs.set(job.id, failed);
+    state.sessions.set(session.id, { ...session, status: "failed", updatedAt: failed.updatedAt });
+    writeSse<RunnerLogEvent>(response, "log", {
+      type: "runner.log",
+      sessionId: session.id,
+      jobId: job.id,
+      sequence: sequence + 1,
+      stream: "stderr",
+      level: "error",
+      category: "error",
+      message: `Sandbox backend failed (${code}, ${status}): ${sanitizeForRunnerLog(message)}`,
+      createdAt: now(),
+    });
+    writeSse(response, "jobStatus", { type: "runner.jobStatus", sessionId: session.id, job: failed });
+  } finally {
+    await backend.cleanup(job.id);
+    response.end();
+  }
 }
 
 async function streamCodexAppServerLogs(
@@ -459,6 +608,21 @@ function createFakePatch(state: ServerState, sessionId: string, timestamp: strin
   });
 }
 
+function resolveBuildRequest(request: BuildJobRequest, config: MobileRunnerConfig): ResolvedSandboxCommand {
+  return resolveSandboxCommand(request, {
+    unsafeCustomCommandsEnabled: config.enableUnsafeCustomCommands,
+    dockerNetworkMode: config.dockerNetworkMode,
+    resourceLimits: config.resourceLimits,
+  });
+}
+
+function createSandboxBackend(config: MobileRunnerConfig): SandboxBackend {
+  if (config.sandboxBackend === "local-docker") {
+    return new LocalDockerSandboxBackend({ image: config.dockerImage });
+  }
+  return new FakeSandboxBackend();
+}
+
 function createCodexAppServerPatch(
   state: ServerState,
   sessionId: string,
@@ -557,12 +721,17 @@ function appendArtifact(state: ServerState, sessionId: string, artifact: BuildAr
   state.artifacts.set(sessionId, [...(state.artifacts.get(sessionId) ?? []), artifact]);
 }
 
-function validateSnapshotPaths(snapshot: ProjectSnapshot): void {
+function validateSnapshotPaths(snapshot: ProjectSnapshot, maxWorkspaceBytes: number): void {
+  let totalBytes = 0;
   for (const file of snapshot.files) {
     validateWorkspacePath(file.path);
+    totalBytes += Buffer.byteLength(file.contentsBase64, "base64");
   }
   for (const deletedPath of snapshot.deletedPaths ?? []) {
     validateWorkspacePath(deletedPath);
+  }
+  if (totalBytes > maxWorkspaceBytes) {
+    throw new HttpError(413, "workspace_rejected", `workspace snapshot exceeds max size ${maxWorkspaceBytes} bytes`);
   }
 }
 

@@ -3,11 +3,13 @@ import type { ReactNode } from "react";
 import { applyPatchProposalToTextWorkspace, normalizeWorkspaceRelativePath } from "@codex/mobile-protocol";
 import type {
   BuildArtifact,
+  BuildJobRequest,
   MobileProject,
   MobileSession,
   PatchProposal,
   RunnerCapabilitiesResponse,
   RunnerJob,
+  SandboxCommandKind,
 } from "@codex/mobile-protocol";
 import { findWorkspaceTextFile, makeProjectSnapshot, sampleWorkspaceFiles, updateWorkspaceTextFile } from "@/file/sample-files";
 import type { WorkspaceTextFile } from "@/file/sample-files";
@@ -45,6 +47,7 @@ type ProjectContextValue = {
   updateActiveFile(text: string): void;
   saveActiveFile(): Promise<void>;
   runRunnerFlow(prompt: string): Promise<RunnerFlowResult | null>;
+  runBuildJob(commandKind: SandboxCommandKind): Promise<RunnerFlowResult | null>;
   refreshRunnerCapabilities(): Promise<void>;
   applyPatchDecision(accepted: boolean): Promise<void>;
   clearError(): void;
@@ -75,7 +78,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [runnerCapabilities, setRunnerCapabilities] = useState<RunnerCapabilitiesResponse | null>(null);
   const [runnerLogs, setRunnerLogs] = useState<string[]>(["runner: idle"]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { role: "agent", text: "Open the sample project, edit files locally, then ask the remote runner for a fake build/fix pass." },
+    { role: "agent", text: "Open the sample project, edit files locally, then ask the runner for a safe build/test pass." },
   ]);
   const [flowStatus, setFlowStatus] = useState<RunnerFlowStatus>("idle");
   const [patchDecision, setPatchDecision] = useState<"pending" | "accepted" | "rejected">("pending");
@@ -233,6 +236,98 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     [activeProject, createSampleProject, files, refreshRunnerCapabilities, runnerClient, session],
   );
 
+  const runBuildJob = useCallback(
+    async (commandKind: SandboxCommandKind): Promise<RunnerFlowResult | null> => {
+      setError(null);
+      setPatchDecision("pending");
+      setPatch(null);
+      setArtifacts([]);
+      setFlowStatus("syncing");
+      setRunnerLogs([`runner: preparing ${commandKind}`]);
+
+      try {
+        await refreshRunnerCapabilities();
+        const project = activeProject ?? (await createSampleProject());
+        const snapshotFiles = files.length > 0 ? files : cloneSampleFiles();
+        let currentSession = session;
+        if (!currentSession) {
+          const created = await runnerClient.createSession({
+            projectId: project.id,
+            projectName: project.name,
+            sourceKind: project.sourceKind,
+          });
+          currentSession = created.session;
+          setSession(currentSession);
+          setProjects((current) =>
+            current.map((candidate) =>
+              candidate.id === project.id ? { ...candidate, runnerSessionId: currentSession?.id } : candidate,
+            ),
+          );
+        }
+
+        await runnerClient.uploadSnapshot(currentSession.id, makeProjectSnapshot(snapshotFiles));
+        setRunnerLogs((current) => [...current, `runner: uploaded ${snapshotFiles.length} files`]);
+        const started = await runnerClient.startJob(currentSession.id, {
+          kind: runnerKindForSandboxCommand(commandKind),
+          command: ["sandbox", commandKind],
+        });
+        const buildRequest: BuildJobRequest = {
+          commandKind,
+          artifactPaths: ["dist", "build", "coverage", "test-results", "mobile-build-output"],
+        };
+        const build = await runnerClient.startBuildJob(currentSession.id, started.job.id, buildRequest);
+        setJob(build.job);
+        setFlowStatus("running");
+        setChatMessages((current) => [
+          ...current,
+          { role: "user", text: `Run ${commandKind} in the runner sandbox.` },
+          { role: "agent", text: `Sandbox job started on ${build.job.sandboxBackend ?? "unknown"} backend.` },
+        ]);
+
+        const streamedArtifacts: BuildArtifact[] = [];
+        const events = await runnerClient.streamJobLogs(currentSession.id, started.job.id, (event) => {
+          if (event.type === "runner.log") {
+            const line = `[${event.stream}] ${event.message}`;
+            setRunnerLogs((current) => [...current, line]);
+          } else if (event.type === "runner.jobStatus") {
+            setJob(event.job);
+          } else if (event.type === "runner.artifact") {
+            streamedArtifacts.push(event.artifact);
+            setArtifacts((current) => upsertArtifact(current, event.artifact));
+          }
+        });
+
+        const latestJob = getLatestJob(events) ?? (await runnerClient.getJob(currentSession.id, started.job.id)).job;
+        const artifactResponse = await runnerClient.getArtifacts(currentSession.id);
+        const nextArtifacts = artifactResponse.artifacts.length > 0 ? artifactResponse.artifacts : streamedArtifacts;
+        setJob(latestJob);
+        setArtifacts(nextArtifacts);
+        setFlowStatus(latestJob.status === "succeeded" ? "succeeded" : "failed");
+        setChatMessages((current) => [
+          ...current,
+          {
+            role: "agent",
+            text: `Sandbox ${commandKind} finished with status ${latestJob.status}${latestJob.exitCode === undefined ? "" : `, exit ${latestJob.exitCode}`}.`,
+          },
+        ]);
+        return {
+          job: latestJob,
+          patch: null,
+          artifacts: nextArtifacts,
+          events,
+        };
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : "unknown sandbox runner error";
+        setError(message);
+        setFlowStatus("failed");
+        setRunnerLogs((current) => [...current, `sandbox error: ${message}`]);
+        setChatMessages((current) => [...current, { role: "agent", text: `Sandbox error: ${message}` }]);
+        return null;
+      }
+    },
+    [activeProject, createSampleProject, files, refreshRunnerCapabilities, runnerClient, session],
+  );
+
   const applyPatchDecision = useCallback(
     async (accepted: boolean) => {
       if (!accepted) {
@@ -280,7 +375,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         setPatchDecision("pending");
       }
     },
-    [activeProject, files, patch],
+    [activePath, activeProject, files, patch],
   );
 
   const value = useMemo<ProjectContextValue>(
@@ -306,6 +401,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       updateActiveFile,
       saveActiveFile,
       runRunnerFlow,
+      runBuildJob,
       refreshRunnerCapabilities,
       applyPatchDecision,
       clearError: () => setError(null),
@@ -331,6 +427,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       updateActiveFile,
       saveActiveFile,
       runRunnerFlow,
+      runBuildJob,
       refreshRunnerCapabilities,
       applyPatchDecision,
     ],
@@ -357,4 +454,16 @@ function upsertProject(projects: MobileProject[], project: MobileProject): Mobil
     return projects.map((candidate) => (candidate.id === project.id ? project : candidate));
   }
   return [project, ...projects];
+}
+
+function upsertArtifact(artifacts: BuildArtifact[], artifact: BuildArtifact): BuildArtifact[] {
+  const existing = artifacts.some((candidate) => candidate.id === artifact.id);
+  if (existing) {
+    return artifacts.map((candidate) => (candidate.id === artifact.id ? artifact : candidate));
+  }
+  return [...artifacts, artifact];
+}
+
+function runnerKindForSandboxCommand(commandKind: SandboxCommandKind): "build" | "test" {
+  return commandKind.endsWith("_test") ? "test" : "build";
 }
