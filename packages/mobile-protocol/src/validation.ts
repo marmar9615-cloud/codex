@@ -7,10 +7,14 @@ import type {
   PatchHunk,
   PatchLine,
   PatchProposal,
+  PatchFileChangeKind,
+  PatchLifecycleStatus,
+  PatchSource,
   ProjectSnapshot,
   ProjectSourceKind,
   ReceivePatchRequest,
   RunnerError,
+  RunnerEventCategory,
   RunnerEvent,
   RunnerCapabilitiesResponse,
   RunnerJob,
@@ -31,13 +35,26 @@ const projectSourceKinds = new Set<ProjectSourceKind>([
 
 const commandKinds = new Set(["build", "test", "preview", "custom"]);
 const sessionStatuses = new Set(["created", "syncing", "ready", "running", "failed", "closed"]);
-const jobStatuses = new Set<RunnerJobStatus>(["queued", "running", "succeeded", "failed", "canceled"]);
+const jobStatuses = new Set<RunnerJobStatus>([
+  "queued",
+  "running",
+  "awaitingApproval",
+  "completed",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "canceled",
+]);
 const runnerModes = new Set<RunnerMode>(["fake", "codex-app-server"]);
 const appServerTransports = new Set<AppServerTransport>(["stdio", "unix", "local-ws"]);
 const logStreams = new Set(["stdout", "stderr", "system"]);
 const logLevels = new Set(["debug", "info", "warn", "error"]);
+const logCategories = new Set<RunnerEventCategory>(["agentText", "plan", "diff", "approval", "tool", "error", "completion", "system"]);
 const artifactKinds = new Set(["webPreview", "testReport", "apk", "aab", "iosBuildLog", "other"]);
 const patchLineKinds = new Set(["context", "add", "remove"]);
+const patchFileChangeKinds = new Set<PatchFileChangeKind>(["added", "modified", "deleted", "unsupported"]);
+const patchSources = new Set<PatchSource>(["fake", "codex-app-server"]);
+const patchLifecycleStatuses = new Set<PatchLifecycleStatus>(["none", "available", "unsupported", "applied", "rejected", "failedToApply"]);
 
 export class ProtocolValidationError extends Error {
   constructor(message: string) {
@@ -196,6 +213,7 @@ export function assertRunnerLogEvent(value: unknown): RunnerLogEvent {
     sequence: expectNumber(object.sequence, "sequence"),
     stream: stream as RunnerLogEvent["stream"],
     level: level as RunnerLogEvent["level"],
+    category: optionalLogCategory(object.category, "category"),
     message: expectString(object.message, "message"),
     createdAt: expectString(object.createdAt, "createdAt"),
   };
@@ -206,9 +224,17 @@ export function assertPatchProposal(value: unknown): PatchProposal {
   return {
     id: expectString(object.id, "id"),
     sessionId: expectString(object.sessionId, "sessionId"),
+    jobId: optionalString(object.jobId, "jobId"),
+    source: optionalPatchSource(object.source, "source"),
+    appServerThreadId: optionalString(object.appServerThreadId, "appServerThreadId"),
+    appServerTurnId: optionalString(object.appServerTurnId, "appServerTurnId"),
     summary: expectString(object.summary, "summary"),
-    unifiedDiff: expectString(object.unifiedDiff, "unifiedDiff"),
+    unifiedDiff: expectAnyString(object.unifiedDiff, "unifiedDiff"),
     files: expectArray(object.files, "files").map(assertPatchFileChange),
+    filesChanged: optionalNumber(object.filesChanged, "filesChanged"),
+    unsupportedChanges: optionalNumber(object.unsupportedChanges, "unsupportedChanges"),
+    status: optionalPatchLifecycleStatus(object.status, "status"),
+    metadata: optionalStringRecord(object.metadata, "metadata"),
     createdAt: expectString(object.createdAt, "createdAt"),
   };
 }
@@ -262,8 +288,13 @@ export function assertRunnerEvent(value: unknown): RunnerEvent {
       type: "runner.patch",
       sessionId: expectString(object.sessionId, "sessionId"),
       patchId: expectString(object.patchId, "patchId"),
+      jobId: optionalString(object.jobId, "jobId"),
+      source: optionalPatchSource(object.source, "source"),
       summary: expectString(object.summary, "summary"),
       unifiedDiff: expectString(object.unifiedDiff, "unifiedDiff"),
+      filesChanged: optionalNumber(object.filesChanged, "filesChanged"),
+      unsupportedChanges: optionalNumber(object.unsupportedChanges, "unsupportedChanges"),
+      status: optionalPatchLifecycleStatus(object.status, "status"),
       createdAt: expectString(object.createdAt, "createdAt"),
     };
   }
@@ -274,6 +305,18 @@ export function assertRunnerEvent(value: unknown): RunnerEvent {
       artifact: assertBuildArtifact(object.artifact),
     };
   }
+  if (type === "runner.approvalRequest") {
+    return {
+      type: "runner.approvalRequest",
+      sessionId: expectString(object.sessionId, "sessionId"),
+      jobId: expectString(object.jobId, "jobId"),
+      requestId: expectStringOrNumber(object.requestId, "requestId"),
+      approvalId: optionalString(object.approvalId, "approvalId"),
+      approvalKind: expectApprovalKind(object.approvalKind, "approvalKind"),
+      summary: expectString(object.summary, "summary"),
+      createdAt: expectString(object.createdAt, "createdAt"),
+    };
+  }
   throw new ProtocolValidationError(`unsupported event type: ${type}`);
 }
 
@@ -282,6 +325,8 @@ function assertPatchFileChange(value: unknown, index: number): PatchFileChange {
   return {
     oldPath: expectString(object.oldPath, `files[${index}].oldPath`),
     newPath: expectString(object.newPath, `files[${index}].newPath`),
+    changeKind: optionalPatchFileChangeKind(object.changeKind, `files[${index}].changeKind`),
+    unsupportedReason: optionalString(object.unsupportedReason, `files[${index}].unsupportedReason`),
     hunks: expectArray(object.hunks, `files[${index}].hunks`).map(assertPatchHunk),
   };
 }
@@ -344,6 +389,16 @@ function expectNumber(value: unknown, label: string): number {
   return value;
 }
 
+function expectStringOrNumber(value: unknown, label: string): string | number {
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  throw new ProtocolValidationError(`${label} must be a non-empty string or finite number`);
+}
+
 function expectBoolean(value: unknown, label: string): boolean {
   if (typeof value !== "boolean") {
     throw new ProtocolValidationError(`${label} must be a boolean`);
@@ -379,6 +434,67 @@ function optionalString(value: unknown, label: string): string | undefined {
     return undefined;
   }
   return expectString(value, label);
+}
+
+function optionalLogCategory(value: unknown, label: string): RunnerEventCategory | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const category = expectString(value, label);
+  if (!logCategories.has(category as RunnerEventCategory)) {
+    throw new ProtocolValidationError(`unsupported runner log category: ${category}`);
+  }
+  return category as RunnerEventCategory;
+}
+
+function optionalPatchFileChangeKind(value: unknown, label: string): PatchFileChangeKind | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const kind = expectString(value, label);
+  if (!patchFileChangeKinds.has(kind as PatchFileChangeKind)) {
+    throw new ProtocolValidationError(`unsupported patch file change kind: ${kind}`);
+  }
+  return kind as PatchFileChangeKind;
+}
+
+function optionalPatchSource(value: unknown, label: string): PatchSource | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const source = expectString(value, label);
+  if (!patchSources.has(source as PatchSource)) {
+    throw new ProtocolValidationError(`unsupported patch source: ${source}`);
+  }
+  return source as PatchSource;
+}
+
+function optionalPatchLifecycleStatus(value: unknown, label: string): PatchLifecycleStatus | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const status = expectString(value, label);
+  if (!patchLifecycleStatuses.has(status as PatchLifecycleStatus)) {
+    throw new ProtocolValidationError(`unsupported patch status: ${status}`);
+  }
+  return status as PatchLifecycleStatus;
+}
+
+function expectApprovalKind(value: unknown, label: string): "command" | "fileChange" | "permissions" | "tool" | "mcp" | "auth" | "legacy" | "unknown" {
+  const kind = expectString(value, label);
+  if (
+    kind !== "command" &&
+    kind !== "fileChange" &&
+    kind !== "permissions" &&
+    kind !== "tool" &&
+    kind !== "mcp" &&
+    kind !== "auth" &&
+    kind !== "legacy" &&
+    kind !== "unknown"
+  ) {
+    throw new ProtocolValidationError(`unsupported approval kind: ${kind}`);
+  }
+  return kind;
 }
 
 function optionalAppServerTransport(value: unknown, label: string): AppServerTransport | undefined {

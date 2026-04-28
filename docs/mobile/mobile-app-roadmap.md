@@ -1,6 +1,6 @@
 # Codex Mobile App Roadmap
 
-Status: MVP foundation plus fake end-to-end runner flow are implemented. Milestone 3 adds a gated Codex app-server bridge in the runner while keeping fake mode as the default.
+Status: MVP foundation, fake end-to-end runner flow, gated Codex app-server bridge, and app-server diff-to-patch review are implemented. Fake mode remains the default.
 
 This roadmap designs a publishable iOS and Android Codex mobile app that feels like a mobile Codex CLI/TUI/Desktop client without pretending that a phone is an unrestricted developer workstation. The mobile app is a controller, editor, reviewer, and preview surface. Build and test execution belongs in a sandboxed remote runner.
 
@@ -110,6 +110,8 @@ Runs in remote sandbox:
 - Heavy builds, tests, dependency installs, shell commands, Gradle, and Xcode-related workflows run in remote sandbox runners, not on the phone.
 - Production ChatGPT/Codex account auth stays gated until OpenAI confirms a supported public mobile OAuth or device-code flow for this client class.
 - The mobile app does not connect directly to `codex app-server`. The runner owns that local bridge and only exposes the mobile protocol over its own API.
+- App-server diffs are treated as patch proposals. They require explicit user review and approval before any workspace file is changed.
+- App-server approval requests fail closed until a first-class mobile approval UI exists.
 
 ## MVP Work Items
 
@@ -132,8 +134,10 @@ Phase 1: Real runner integration
 - Host the runner in a sandbox-capable environment.
 - Bridge runner sessions to `codex app-server` v2 over local stdio/unix socket or authenticated websocket. Stdio prototype is implemented; unix socket and authenticated local websocket remain future work.
 - Mirror app-server turn/item notifications into mobile-friendly events. Initial log/status mapping is implemented.
-- Map app-server diff/file-change notifications into mobile diff review models.
+- Map app-server `turn/diff/updated` unified diffs into mobile `PatchProposal` review models. Done for modified, added, deleted, empty, and unsupported text diff cases.
 - Add project snapshot upload and incremental file sync.
+- Add interactive mobile approval UI for app-server command/write/network/permission requests. Not done; current bridge fails closed and never auto-approves.
+- Add real remote sandbox build/test backend. Not done; this is the next build milestone.
 
 Phase 2: GitHub and project lifecycle
 
@@ -230,6 +234,8 @@ pnpm --filter @codex/mobile start
 
 The runner currently streams fake logs and returns fake artifact metadata. The mobile app currently renders working navigation and placeholder flows over local sample data.
 
+Milestone 4 also supports a gated real Codex app-server patch-review path. When `RUNNER_MODE=codex-app-server` emits `turn/diff/updated`, the runner parses the aggregated unified diff into a mobile `PatchProposal`. The app displays it in `DiffReviewScreen`, blocks unsupported changes, and applies supported text patches only after the user taps apply. Approval requests from app-server currently fail closed instead of auto-approving.
+
 To try the gated Codex app-server bridge locally, start the runner with:
 
 ```bash
@@ -240,3 +246,7 @@ pnpm --filter @codex/mobile-runner dev
 ```
 
 If the Codex binary cannot start or the bridge cannot initialize, the runner returns a structured error instead of pretending the fake runner is real Codex. Normal mobile testing should continue to use the default `RUNNER_MODE=fake` until remote sandbox infrastructure and supported production ChatGPT/Codex mobile auth are confirmed.
+
+## Next Milestone
+
+The next real build step is a remote sandbox build/test backend. It should run commands inside contained runner environments, stream logs and artifacts through the existing mobile protocol, and keep phone-side execution limited to safe app-contained editing, preview, and user-approved patch application.

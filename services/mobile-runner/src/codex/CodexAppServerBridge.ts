@@ -1,4 +1,4 @@
-import type { RunnerJobStatus, RunnerLogEvent } from "@codex/mobile-protocol";
+import type { RunnerApprovalRequestEvent, RunnerJobStatus, RunnerLogEvent } from "@codex/mobile-protocol";
 import type { AppServerTransport } from "@codex/mobile-protocol";
 import { AppServerProcessManager, CodexAppServerBridgeError } from "./AppServerProcessManager.js";
 import { mapAppServerNotification } from "./appServerEventMapper.js";
@@ -10,7 +10,7 @@ import {
   isJsonRpcResponseFor,
   sanitizeForRunnerLog,
 } from "./jsonRpc.js";
-import type { JsonRpcMessage, JsonRpcResponse } from "./jsonRpc.js";
+import type { JsonRpcMessage, JsonRpcRequest, JsonRpcResponse } from "./jsonRpc.js";
 
 export type CodexAppServerBridgeOptions = {
   bin: string;
@@ -25,6 +25,8 @@ export type CodexRunTurnOptions = {
   cwd: string;
   prompt: string;
   onLogEvent?: (event: RunnerLogEvent) => void;
+  onDiffUpdate?: (diff: { threadId: string; turnId: string; unifiedDiff: string }) => void;
+  onApprovalRequest?: (event: RunnerApprovalRequestEvent) => void;
 };
 
 export type CodexRunTurnResult = {
@@ -92,6 +94,9 @@ export class CodexAppServerBridge {
         if (mapped.status) {
           terminalStatus = mapped.status;
         }
+        if (mapped.diffUpdate) {
+          run.onDiffUpdate?.(mapped.diffUpdate);
+        }
         if (mapped.completed) {
           completed = true;
         }
@@ -101,13 +106,21 @@ export class CodexAppServerBridge {
         return;
       }
       if (isJsonRpcRequest(message)) {
-        process.write({
-          id: message.id,
-          error: {
-            code: -32601,
-            message: "mobile-runner does not grant app-server approval requests yet",
-          },
-        });
+        const approval = createFailClosedApprovalEvent(message, run.sessionId, run.jobId, this.options.now());
+        if (approval) {
+          run.onApprovalRequest?.(approval);
+          process.write({ id: message.id, result: failClosedApprovalResponse(message.method) });
+          terminalStatus = "failed";
+          completed = true;
+        } else {
+          process.write({
+            id: message.id,
+            error: {
+              code: -32601,
+              message: "mobile-runner does not support this app-server client request",
+            },
+          });
+        }
         emit({
           type: "runner.log",
           sessionId: run.sessionId,
@@ -115,7 +128,10 @@ export class CodexAppServerBridge {
           sequence: sequence++,
           stream: "stderr",
           level: "warn",
-          message: `Codex app-server requested unsupported client method: ${sanitizeForRunnerLog(message.method)}`,
+          category: "approval",
+          message: approval
+            ? `Approval required; mobile approval UI not implemented yet. Denied ${sanitizeForRunnerLog(message.method)}.`
+            : `Codex app-server requested unsupported client method: ${sanitizeForRunnerLog(message.method)}`,
           createdAt: this.options.now(),
         });
       }
@@ -219,6 +235,70 @@ export class CodexAppServerBridge {
       handleMessage(message);
     }
   }
+}
+
+function createFailClosedApprovalEvent(
+  message: JsonRpcRequest,
+  sessionId: string,
+  jobId: string,
+  createdAt: string,
+): RunnerApprovalRequestEvent | null {
+  const kind = approvalKindForMethod(message.method);
+  if (!kind) {
+    return null;
+  }
+  const params = typeof message.params === "object" && message.params !== null ? (message.params as Record<string, unknown>) : {};
+  const approvalId = typeof params.approvalId === "string" ? params.approvalId : undefined;
+  const reason = typeof params.reason === "string" && params.reason.length > 0 ? params.reason : undefined;
+  return {
+    type: "runner.approvalRequest",
+    sessionId,
+    jobId,
+    requestId: message.id,
+    approvalId,
+    approvalKind: kind,
+    summary: reason ?? `Codex app-server requested ${message.method}; denied by fail-closed mobile runner policy.`,
+    createdAt,
+  };
+}
+
+export function approvalKindForMethod(method: string): RunnerApprovalRequestEvent["approvalKind"] | null {
+  if (method === "item/commandExecution/requestApproval" || method === "execCommandApproval") {
+    return method === "execCommandApproval" ? "legacy" : "command";
+  }
+  if (method === "item/fileChange/requestApproval" || method === "applyPatchApproval") {
+    return method === "applyPatchApproval" ? "legacy" : "fileChange";
+  }
+  if (method === "item/permissions/requestApproval") {
+    return "permissions";
+  }
+  if (method === "item/tool/requestUserInput" || method === "item/tool/call") {
+    return "tool";
+  }
+  if (method === "mcpServer/elicitation/request") {
+    return "mcp";
+  }
+  if (method === "account/chatgptAuthTokens/refresh") {
+    return "auth";
+  }
+  return null;
+}
+
+export function failClosedApprovalResponse(method: string): unknown {
+  if (method === "execCommandApproval" || method === "applyPatchApproval") {
+    return { decision: "denied" };
+  }
+  if (method === "mcpServer/elicitation/request") {
+    return { action: "decline", content: null };
+  }
+  if (method === "item/permissions/requestApproval") {
+    return {
+      permissions: { type: "none" },
+      scope: "turn",
+      strictAutoReview: true,
+    };
+  }
+  return { decision: "decline" };
 }
 
 function extractNestedString(value: unknown, path: string[]): string | undefined {

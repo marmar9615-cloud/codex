@@ -11,9 +11,12 @@ test("parses runner SSE events and finds final job status", () => {
       "event: jobStatus",
       'data: {"type":"runner.jobStatus","sessionId":"mrs_0001","job":{"id":"mrj_0001","sessionId":"mrs_0001","kind":"test","command":["npm","test"],"mode":"fake","status":"succeeded","createdAt":"2026-04-28T20:00:00.000Z","updatedAt":"2026-04-28T20:00:00.000Z"}}',
       "",
+      "event: patch",
+      'data: {"type":"runner.patch","sessionId":"mrs_0001","jobId":"mrj_0001","patchId":"mrp_0001","source":"codex-app-server","summary":"Patch ready","unifiedDiff":"--- a/README.md\\n+++ b/README.md\\n","filesChanged":1,"unsupportedChanges":0,"status":"available","createdAt":"2026-04-28T20:00:00.000Z"}',
+      "",
     ].join("\n"),
   );
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 3);
   assert.equal(getLatestJob(events)?.status, "succeeded");
 });
 

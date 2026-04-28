@@ -13,6 +13,11 @@ export type AppServerEventMapping = {
   log?: RunnerLogEvent;
   appServerThreadId?: string;
   appServerTurnId?: string;
+  diffUpdate?: {
+    threadId: string;
+    turnId: string;
+    unifiedDiff: string;
+  };
   completed?: boolean;
   status?: RunnerJobStatus;
 };
@@ -27,7 +32,7 @@ export function mapAppServerNotification(
       const threadId = nestedString(params, ["thread", "id"]);
       return {
         appServerThreadId: threadId,
-        log: createLog(context, "system", "info", `Codex app-server thread started${threadId ? `: ${threadId}` : ""}`),
+        log: createLog(context, "system", "info", `Codex app-server thread started${threadId ? `: ${threadId}` : ""}`, "system"),
       };
     }
     case "turn/started": {
@@ -36,23 +41,32 @@ export function mapAppServerNotification(
       return {
         appServerThreadId: threadId,
         appServerTurnId: turnId,
-        log: createLog(context, "system", "info", `Codex app-server turn started${turnId ? `: ${turnId}` : ""}`),
+        log: createLog(context, "system", "info", `Codex app-server turn started${turnId ? `: ${turnId}` : ""}`, "system"),
       };
     }
     case "item/agentMessage/delta":
-      return { log: createLog(context, "stdout", "info", stringField(params, "delta") ?? "") };
+      return { log: createLog(context, "stdout", "info", stringField(params, "delta") ?? "", "agentText") };
     case "item/commandExecution/outputDelta":
     case "command/exec/outputDelta":
-      return { log: createLog(context, "stdout", "info", stringField(params, "delta") ?? "") };
+      return { log: createLog(context, "stdout", "info", stringField(params, "delta") ?? "", "tool") };
     case "item/fileChange/outputDelta":
-      return { log: createLog(context, "system", "info", stringField(params, "delta") ?? "Codex reported file-change output.") };
-    case "turn/diff/updated":
-      return { log: createLog(context, "system", "info", "Codex app-server emitted a diff update.") };
+      return { log: createLog(context, "system", "info", stringField(params, "delta") ?? "Codex reported file-change output.", "tool") };
+    case "turn/diff/updated": {
+      const unifiedDiff = stringField(params, "diff") ?? "";
+      const threadId = stringField(params, "threadId") ?? "";
+      const turnId = stringField(params, "turnId") ?? "";
+      return {
+        appServerThreadId: threadId,
+        appServerTurnId: turnId,
+        diffUpdate: { threadId, turnId, unifiedDiff },
+        log: createLog(context, "system", "info", "Codex app-server emitted a diff update.", "diff"),
+      };
+    }
     case "turn/plan/updated":
-      return { log: createLog(context, "system", "info", "Codex app-server updated its plan.") };
+      return { log: createLog(context, "system", "info", "Codex app-server updated its plan.", "plan") };
     case "error": {
       const message = nestedString(params, ["error", "message"]) ?? "Codex app-server emitted an error.";
-      return { log: createLog(context, "stderr", "error", message), status: "failed" };
+      return { log: createLog(context, "stderr", "error", message, "error"), status: "failed" };
     }
     case "turn/completed": {
       const turnId = nestedString(params, ["turn", "id"]);
@@ -68,12 +82,13 @@ export function mapAppServerNotification(
           status === "succeeded" ? "system" : "stderr",
           status === "succeeded" ? "info" : "error",
           errorMessage ?? `Codex app-server turn completed with status: ${turnStatus ?? "completed"}`,
+          "completion",
         ),
       };
     }
     default:
       return {
-        log: createLog(context, "system", "debug", `Codex app-server notification: ${notification.method}`),
+        log: createLog(context, "system", "debug", `Codex app-server notification: ${notification.method}`, "system"),
       };
   }
 }
@@ -83,6 +98,7 @@ function createLog(
   stream: RunnerLogStream,
   level: RunnerLogLevel,
   message: string,
+  category: RunnerLogEvent["category"],
 ): RunnerLogEvent {
   return {
     type: "runner.log",
@@ -91,6 +107,7 @@ function createLog(
     sequence: context.sequence,
     stream,
     level,
+    category,
     message: sanitizeForRunnerLog(message),
     createdAt: context.now(),
   };

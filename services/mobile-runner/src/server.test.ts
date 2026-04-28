@@ -69,7 +69,11 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
 
     const patch = await get<GetPatchResponse>(url, `/sessions/${created.session.id}/patch`);
     assert.equal(patch.patch?.id, "mrp_0001");
+    assert.equal(patch.patch?.source, "fake");
+    assert.equal(patch.patch?.status, "available");
+    assert.equal(patch.patch?.filesChanged, 1);
     assert.equal(patch.patch?.files[0]?.newPath, "src/App.tsx");
+    assert.equal(patch.patch?.files[0]?.changeKind, "modified");
     assert.match(patch.patch?.unifiedDiff ?? "", /Codex Mobile Runner/);
 
     const artifact = await post<{ artifact: unknown }>(url, `/sessions/${created.session.id}/artifacts`, {

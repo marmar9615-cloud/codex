@@ -23,7 +23,22 @@ test("maps app-server turn and message notifications to runner logs", () => {
     { ...context, sequence: 2 },
   );
   assert.equal(delta.log?.stream, "stdout");
+  assert.equal(delta.log?.category, "agentText");
   assert.equal(delta.log?.message, "Hello from Codex.");
+});
+
+test("maps app-server diff notifications", () => {
+  const mapped = mapAppServerNotification(
+    {
+      method: "turn/diff/updated",
+      params: { threadId: "thr_123", turnId: "turn_456", diff: "--- a/README.md\n+++ b/README.md\n" },
+    },
+    context,
+  );
+  assert.equal(mapped.diffUpdate?.threadId, "thr_123");
+  assert.equal(mapped.diffUpdate?.turnId, "turn_456");
+  assert.match(mapped.diffUpdate?.unifiedDiff ?? "", /README/);
+  assert.equal(mapped.log?.category, "diff");
 });
 
 test("detects app-server turn completion", () => {

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { applyUnifiedPatchToText, normalizeWorkspaceRelativePath } from "@codex/mobile-protocol";
+import { applyPatchProposalToTextWorkspace, normalizeWorkspaceRelativePath } from "@codex/mobile-protocol";
 import type {
   BuildArtifact,
   MobileProject,
@@ -12,7 +12,7 @@ import type {
 import { findWorkspaceTextFile, makeProjectSnapshot, sampleWorkspaceFiles, updateWorkspaceTextFile } from "@/file/sample-files";
 import type { WorkspaceTextFile } from "@/file/sample-files";
 import { createSampleWorkspaceProject } from "@/file/sample-workspace";
-import { writeWorkspaceText } from "@/file/workspace-provider";
+import { deleteWorkspacePath, writeWorkspaceText } from "@/file/workspace-provider";
 import { getLatestJob, MobileRunnerClient } from "@/runner/runner-client";
 import type { RunnerFlowResult } from "@/runner/runner-client";
 
@@ -197,6 +197,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
             setChatMessages((current) => [...current, { role: "agent", text: line }]);
           } else if (event.type === "runner.jobStatus") {
             setJob(event.job);
+          } else if (event.type === "runner.patch") {
+            setChatMessages((current) => [...current, { role: "agent", text: `Patch update: ${event.summary}` }]);
+          } else if (event.type === "runner.approvalRequest") {
+            setChatMessages((current) => [...current, { role: "agent", text: `Approval required but not implemented: ${event.summary}` }]);
           }
         });
 
@@ -240,29 +244,36 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         setError("No patch proposal is available.");
         return;
       }
-      const change = patch.files[0];
-      if (!change) {
-        setError("Patch proposal did not include changed files.");
+      if (patch.files.length === 0 || patch.status === "none") {
+        setError("No file changes were produced.");
+        return;
+      }
+      if (patch.status === "unsupported" || (patch.unsupportedChanges ?? 0) > 0) {
+        setError("This patch includes unsupported changes and cannot be applied on mobile yet.");
         return;
       }
       try {
-        const path = normalizeWorkspaceRelativePath(change.newPath);
-        const target = findWorkspaceTextFile(files, path);
-        if (!target) {
-          throw new Error(`Patch target is not in the active workspace: ${path}`);
-        }
-        const result = applyUnifiedPatchToText(target.text, patch.unifiedDiff);
+        const result = applyPatchProposalToTextWorkspace(files, patch, { workspaceRootPresent: activeProject !== null });
         if (!result.ok) {
           throw new Error(result.error);
         }
-        const nextFiles = updateWorkspaceTextFile(files, path, result.text);
-        setFiles(nextFiles);
+        const changedPaths = new Set(patch.files.map((change) => normalizeWorkspaceRelativePath(change.changeKind === "deleted" ? change.oldPath : change.newPath)));
+        setFiles(result.files);
         if (activeProject) {
-          await writeWorkspaceText(activeProject.workspaceUri, path, result.text);
+          for (const workspaceFile of result.files) {
+            if (changedPaths.has(workspaceFile.path)) {
+              await writeWorkspaceText(activeProject.workspaceUri, workspaceFile.path, workspaceFile.text);
+            }
+          }
+          for (const backup of result.backups) {
+            if (!result.files.some((workspaceFile) => workspaceFile.path === backup.path)) {
+              await deleteWorkspacePath(activeProject.workspaceUri, backup.path);
+            }
+          }
         }
         setPatchDecision("accepted");
-        setActivePath(path);
-        setChatMessages((current) => [...current, { role: "agent", text: `Patch applied to ${path}.` }]);
+        setActivePath(result.files.find((file) => changedPaths.has(file.path))?.path ?? activePath);
+        setChatMessages((current) => [...current, { role: "agent", text: `Patch applied to ${changedPaths.size} file(s).` }]);
       } catch (caught) {
         const message = caught instanceof Error ? caught.message : "unknown patch error";
         setError(message);

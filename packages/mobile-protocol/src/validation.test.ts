@@ -8,6 +8,7 @@ import {
   assertProjectSnapshot,
   assertRunnerError,
   assertRunnerCapabilitiesResponse,
+  assertRunnerEvent,
   assertRunnerJob,
   assertRunnerLogEvent,
   assertStartJobRequest,
@@ -90,6 +91,7 @@ test("validates runner job and log payloads", () => {
       sequence: 1,
       stream: "stdout",
       level: "info",
+      category: "agentText",
       message: "hello",
       createdAt: timestamp,
     }).message,
@@ -124,13 +126,22 @@ test("validates patch proposals and artifacts", () => {
   const patch = assertPatchProposal({
     id: "mrp_0001",
     sessionId: "mrs_0001",
+    jobId: "mrj_0001",
+    source: "codex-app-server",
+    appServerThreadId: "thr_123",
+    appServerTurnId: "turn_123",
     summary: "Update sample app title.",
     unifiedDiff: "--- a/src/App.tsx\n+++ b/src/App.tsx\n",
     createdAt: timestamp,
+    filesChanged: 1,
+    unsupportedChanges: 0,
+    status: "available",
+    metadata: { source: "codex-app-server" },
     files: [
       {
         oldPath: "src/App.tsx",
         newPath: "src/App.tsx",
+        changeKind: "modified",
         hunks: [
           {
             oldStart: 1,
@@ -144,6 +155,7 @@ test("validates patch proposals and artifacts", () => {
     ],
   });
   assert.equal(patch.files[0]?.newPath, "src/App.tsx");
+  assert.equal(patch.source, "codex-app-server");
 
   const artifact = assertBuildArtifact({
     id: "mra_0001",
@@ -158,6 +170,22 @@ test("validates patch proposals and artifacts", () => {
     createdAt: timestamp,
   });
   assert.equal(artifact.apkUrl, "https://example.invalid/app.apk");
+});
+
+test("validates approval request events", () => {
+  assert.equal(
+    assertRunnerEvent({
+      type: "runner.approvalRequest",
+      sessionId: "mrs_0001",
+      jobId: "mrj_0001",
+      requestId: 61,
+      approvalId: "approval-1",
+      approvalKind: "command",
+      summary: "Approval required",
+      createdAt: timestamp,
+    }).type,
+    "runner.approvalRequest",
+  );
 });
 
 test("validates runner errors", () => {

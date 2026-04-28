@@ -1,3 +1,6 @@
+import { normalizeWorkspaceRelativePath } from "./file-access.js";
+import type { PatchHunk, PatchLine, PatchProposal } from "./types.js";
+
 export type UnifiedPatchApplyResult =
   | { ok: true; text: string; appliedHunks: number }
   | { ok: false; error: string; failedHunk: number };
@@ -10,14 +13,20 @@ type ParsedHunk = {
 const hunkHeaderPattern = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 export function applyUnifiedPatchToText(original: string, unifiedDiff: string): UnifiedPatchApplyResult {
-  const hunks = parseHunks(unifiedDiff);
+  return applyPatchHunksToText(original, parseHunks(unifiedDiff));
+}
+
+export function applyPatchHunksToText(
+  original: string,
+  hunks: Array<{ oldStart: number; lines: string[] | PatchLine[] }>,
+): UnifiedPatchApplyResult {
   const { lines: originalLines, trailingNewline } = splitText(original);
   const output: string[] = [];
   let originalIndex = 0;
 
   for (let hunkIndex = 0; hunkIndex < hunks.length; hunkIndex += 1) {
     const hunk = hunks[hunkIndex];
-    const copyUntil = hunk.oldStart - 1;
+    const copyUntil = Math.max(0, hunk.oldStart - 1);
     if (copyUntil < originalIndex) {
       return { ok: false, error: "overlapping or out-of-order hunk", failedHunk: hunkIndex };
     }
@@ -27,7 +36,11 @@ export function applyUnifiedPatchToText(original: string, unifiedDiff: string): 
       originalIndex += 1;
     }
 
-    for (const rawLine of hunk.lines) {
+    for (const patchLine of hunk.lines) {
+      const rawLine =
+        typeof patchLine === "string"
+          ? patchLine
+          : `${patchLine.kind === "context" ? " " : patchLine.kind === "add" ? "+" : "-"}${patchLine.text}`;
       if (rawLine.startsWith("\\")) {
         continue;
       }
@@ -68,6 +81,72 @@ export function applyUnifiedPatchToText(original: string, unifiedDiff: string): 
   return { ok: true, text: joinText(output, trailingNewline), appliedHunks: hunks.length };
 }
 
+export type TextWorkspaceFile = {
+  path: string;
+  text: string;
+};
+
+export type TextWorkspaceBackup = {
+  path: string;
+  existed: boolean;
+  text?: string;
+};
+
+export type PatchWorkspaceApplyResult =
+  | { ok: true; files: TextWorkspaceFile[]; backups: TextWorkspaceBackup[] }
+  | { ok: false; error: string };
+
+export function applyPatchProposalToTextWorkspace(
+  files: TextWorkspaceFile[],
+  patch: PatchProposal,
+  options: { workspaceRootPresent?: boolean } = {},
+): PatchWorkspaceApplyResult {
+  if (options.workspaceRootPresent === false) {
+    return { ok: false, error: "workspace root is missing" };
+  }
+  if ((patch.unsupportedChanges ?? 0) > 0 || patch.files.some((file) => file.changeKind === "unsupported")) {
+    return { ok: false, error: "patch includes unsupported changes" };
+  }
+
+  let nextFiles = files.map((file) => ({ path: normalizeWorkspaceRelativePath(file.path), text: file.text }));
+  const backups: TextWorkspaceBackup[] = [];
+
+  for (const change of patch.files) {
+    const targetPath = normalizeWorkspaceRelativePath(change.changeKind === "deleted" ? change.oldPath : change.newPath);
+    const existing = nextFiles.find((file) => file.path === targetPath);
+    backups.push({ path: targetPath, existed: existing !== undefined, text: existing?.text });
+
+    if (change.changeKind === "added") {
+      if (existing) {
+        return { ok: false, error: `cannot add file that already exists: ${targetPath}` };
+      }
+      const result = applyPatchHunksToText("", change.hunks);
+      if (!result.ok) {
+        return { ok: false, error: `failed to add ${targetPath}: ${result.error}` };
+      }
+      nextFiles = [...nextFiles, { path: targetPath, text: result.text }];
+      continue;
+    }
+
+    if (!existing) {
+      return { ok: false, error: `patch target is not in the active workspace: ${targetPath}` };
+    }
+
+    const result = applyPatchHunksToText(existing.text, change.hunks);
+    if (!result.ok) {
+      return { ok: false, error: `failed to patch ${targetPath}: ${result.error}` };
+    }
+
+    if (change.changeKind === "deleted") {
+      nextFiles = nextFiles.filter((file) => file.path !== targetPath);
+    } else {
+      nextFiles = nextFiles.map((file) => (file.path === targetPath ? { ...file, text: result.text } : file));
+    }
+  }
+
+  return { ok: true, files: nextFiles.sort((a, b) => a.path.localeCompare(b.path)), backups };
+}
+
 function parseHunks(unifiedDiff: string): ParsedHunk[] {
   const hunks: ParsedHunk[] = [];
   let current: ParsedHunk | null = null;
@@ -94,6 +173,9 @@ function parseHunks(unifiedDiff: string): ParsedHunk[] {
 }
 
 function splitText(text: string): { lines: string[]; trailingNewline: boolean } {
+  if (text.length === 0) {
+    return { lines: [], trailingNewline: false };
+  }
   const trailingNewline = text.endsWith("\n");
   const lines = text.split(/\n/);
   if (trailingNewline) {

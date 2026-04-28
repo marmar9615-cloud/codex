@@ -21,6 +21,10 @@ export async function readWorkspaceText(rootUri: string, relativePath: string): 
   return FileSystem.readAsStringAsync(joinWorkspaceUri(rootUri, relativePath));
 }
 
+export async function deleteWorkspacePath(rootUri: string, relativePath: string): Promise<void> {
+  await FileSystem.deleteAsync(joinWorkspaceUri(rootUri, relativePath), { idempotent: true });
+}
+
 export async function listWorkspaceEntries(rootUri: string): Promise<string[]> {
   return FileSystem.readDirectoryAsync(rootUri);
 }

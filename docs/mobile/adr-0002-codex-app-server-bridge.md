@@ -1,6 +1,6 @@
 # ADR 0002: Runner-Side Codex App-Server Bridge
 
-Status: accepted for Milestone 3 prototype.
+Status: accepted for Milestone 3 prototype, extended in Milestone 4 for diff-to-patch review.
 
 ## Context
 
@@ -24,7 +24,9 @@ The default remains `RUNNER_MODE=fake`. In `codex-app-server` mode, the runner s
 3. `thread/start`
 4. `turn/start`
 5. streamed notification mapping into `RunnerLogEvent`
-6. terminal `turn/completed` detection
+6. `turn/diff/updated` parsing into mobile `PatchProposal`
+7. fail-closed handling for app-server approval requests
+8. terminal `turn/completed` detection
 
 The mobile app never connects directly to app-server. It only talks to `services/mobile-runner` through `packages/mobile-protocol`.
 
@@ -34,8 +36,22 @@ The mobile app never connects directly to app-server. It only talks to `services
 - Codex app-server mode can fail honestly with structured `RunnerError` responses.
 - App-server credentials, tokens, and stderr are redacted before runner logs are sent to mobile.
 - The bridge passes only the materialized runner workspace snapshot as `cwd`.
-- App-server approval requests are not granted automatically in this prototype.
+- App-server unified diffs become reviewable mobile patch proposals. They are not applied automatically.
+- App-server approval requests are not granted automatically. Milestone 4 fails closed and emits a mobile approval event/log instead of approving command, patch, network, or permission access.
 - Real remote sandbox infrastructure, GitHub clone/push, and production ChatGPT/Codex mobile auth remain separate milestones.
+
+## Milestone 4 Diff Review Extension
+
+`turn/diff/updated` carries an aggregated unified diff. The runner parses that diff into the shared mobile protocol patch model with:
+
+- patch source `codex-app-server`,
+- app-server thread and turn IDs,
+- changed-file and unsupported-change counts,
+- file-level change kinds for added, modified, deleted, and unsupported changes.
+
+The shared parser rejects absolute paths, `..` traversal, and workspace escapes. Unsupported operations are represented explicitly and block apply in the mobile UI.
+
+This keeps the mobile app in the reviewer role. A file changes only after the user accepts the patch and the shared patch helper applies it inside the active workspace root.
 
 ## Non-Goals
 
@@ -43,3 +59,5 @@ The mobile app never connects directly to app-server. It only talks to `services
 - No unauthenticated remote app-server listener.
 - No local phone-side arbitrary code execution.
 - No ChatGPT scraping, cookie auth, password collection, or private endpoints.
+- No automatic approval of app-server requests.
+- No claim that real remote sandbox builds/tests are complete.

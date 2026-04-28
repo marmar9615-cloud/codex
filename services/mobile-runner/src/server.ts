@@ -8,6 +8,7 @@ import {
   assertStartJobRequest,
   assertUploadSnapshotRequest,
   normalizeWorkspaceRelativePath,
+  parseUnifiedDiffToPatchProposal,
 } from "@codex/mobile-protocol";
 import type {
   ArtifactListResponse,
@@ -328,16 +329,7 @@ async function streamFakeLogs(
   appendArtifact(state, session.id, createFakeArtifact(state, session.id, job.id, now()));
 
   response.write("event: patch\n");
-  response.write(
-    `data: ${JSON.stringify({
-      type: "runner.patch",
-      sessionId: session.id,
-      patchId: patch.id,
-      summary: patch.summary,
-      unifiedDiff: patch.unifiedDiff,
-      createdAt: patch.createdAt,
-    })}\n\n`,
-  );
+  response.write(`data: ${JSON.stringify(patchEventFromProposal(patch))}\n\n`);
   response.write("event: jobStatus\n");
   response.write(`data: ${JSON.stringify({ type: "runner.jobStatus", sessionId: session.id, job: completed })}\n\n`);
   response.end();
@@ -373,6 +365,17 @@ async function streamCodexAppServerLogs(
       cwd,
       prompt: state.jobPrompts.get(job.id) ?? promptFromCommand(job.command),
       onLogEvent: (event) => writeSse(response, "log", event),
+      onDiffUpdate: (diff) => {
+        const patch = createCodexAppServerPatch(state, session.id, job.id, diff, now());
+        state.patches.set(session.id, patch);
+        writeSse(response, "patch", patchEventFromProposal(patch));
+      },
+      onApprovalRequest: (event) => {
+        const awaitingApproval = assertRunnerJob({ ...running, status: "awaitingApproval", updatedAt: now() });
+        state.jobs.set(job.id, awaitingApproval);
+        writeSse(response, "approvalRequest", event);
+        writeSse(response, "jobStatus", { type: "runner.jobStatus", sessionId: session.id, job: awaitingApproval });
+      },
     });
     const completed = assertRunnerJob({
       ...running,
@@ -412,6 +415,7 @@ function createFakePatch(state: ServerState, sessionId: string, timestamp: strin
   return assertPatchProposal({
     id: formatId("mrp", state.nextPatch++),
     sessionId,
+    source: "fake",
     summary: "Update the sample app title from Codex to Codex Mobile Runner.",
     unifiedDiff: `--- a/src/App.tsx
 +++ b/src/App.tsx
@@ -428,6 +432,7 @@ function createFakePatch(state: ServerState, sessionId: string, timestamp: strin
       {
         oldPath: "src/App.tsx",
         newPath: "src/App.tsx",
+        changeKind: "modified",
         hunks: [
           {
             oldStart: 1,
@@ -447,8 +452,53 @@ function createFakePatch(state: ServerState, sessionId: string, timestamp: strin
         ],
       },
     ],
+    filesChanged: 1,
+    unsupportedChanges: 0,
+    status: "available",
     createdAt: timestamp,
   });
+}
+
+function createCodexAppServerPatch(
+  state: ServerState,
+  sessionId: string,
+  jobId: string,
+  diff: { threadId: string; turnId: string; unifiedDiff: string },
+  timestamp: string,
+): PatchProposal {
+  return assertPatchProposal(
+    parseUnifiedDiffToPatchProposal(diff.unifiedDiff, {
+      id: formatId("mrp", state.nextPatch++),
+      sessionId,
+      jobId,
+      source: "codex-app-server",
+      appServerThreadId: diff.threadId,
+      appServerTurnId: diff.turnId,
+      createdAt: timestamp,
+      metadata: {
+        source: "codex-app-server",
+        threadId: diff.threadId,
+        turnId: diff.turnId,
+        jobId,
+      },
+    }),
+  );
+}
+
+function patchEventFromProposal(patch: PatchProposal) {
+  return {
+    type: "runner.patch" as const,
+    sessionId: patch.sessionId,
+    jobId: patch.jobId,
+    patchId: patch.id,
+    source: patch.source,
+    summary: patch.summary,
+    unifiedDiff: patch.unifiedDiff,
+    filesChanged: patch.filesChanged,
+    unsupportedChanges: patch.unsupportedChanges,
+    status: patch.status,
+    createdAt: patch.createdAt,
+  };
 }
 
 function createFakeArtifact(state: ServerState, sessionId: string, jobId: string, timestamp: string): BuildArtifact {

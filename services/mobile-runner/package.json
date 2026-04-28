@@ -10,6 +10,7 @@
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
     "sync-app-server-types": "node scripts/sync-app-server-types.mjs",
+    "smoke:live-codex-app-server": "node scripts/live-codex-app-server-smoke.mjs",
     "test": "tsx --test src/*.test.ts src/**/*.test.ts"
   },
   "dependencies": {

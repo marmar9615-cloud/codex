@@ -7,6 +7,8 @@ Status: review-prep checklist. It is intentionally conservative.
 - Guideline 2.5.2 risk: avoid local execution of arbitrary downloaded code. Builds/tests must run remotely.
 - Filesystem risk: do not claim unrestricted file access. Use app workspace and user-selected document flows.
 - Transport risk: do not expose `codex app-server` directly to a mobile device over an unauthenticated network listener. The runner bridge must stay server-side and prefer stdio/unix socket or authenticated localhost-only transport.
+- Patch risk: never apply agent-generated diffs automatically. Every app-server `turn/diff/updated` patch must be shown for user review, and unsupported or unsafe paths must block apply.
+- Approval risk: app-server approval requests must fail closed until the mobile app has an explicit approve/deny UI.
 - Auth risk: do not scrape ChatGPT, collect passwords, use cookies, or call private endpoints.
 - Privacy risk: disclose source snapshot uploads, logs, account data, and diagnostics if shipped.
 - Export compliance risk: answer encryption questions based on the actual shipped network/auth/storage behavior.
@@ -19,6 +21,7 @@ Status: review-prep checklist. It is intentionally conservative.
 - Data Safety risk: disclose runner uploads, logs, account data, and diagnostics if shipped.
 - Auth risk: keep production ChatGPT/Codex sign-in gated until officially supported.
 - Runner risk: keep heavy build/test execution and Codex app-server integration in the runner; the Android app remains a client using app storage plus SAF/user grants.
+- Patch risk: require explicit user approval before applying agent patches, and keep path traversal checks in the shared protocol helper.
 - Metadata risk: store listing must not promise unavailable GitHub, auth, local terminal, or full filesystem features.
 
 ## What Codex Can Automate
@@ -28,6 +31,7 @@ Status: review-prep checklist. It is intentionally conservative.
 - Verify release placeholders are replaced before a real build/upload.
 - Generate review-note drafts that explain sandboxed remote execution and explicit patch approval.
 - Verify `RUNNER_MODE=fake` remains the safe default and `RUNNER_MODE=codex-app-server` is clearly developer-gated.
+- Verify app-server diffs are converted to reviewable `PatchProposal` objects and are never applied without an explicit user action.
 
 ## What You Must Do Manually
 
@@ -50,3 +54,4 @@ Status: review-prep checklist. It is intentionally conservative.
 - Official ChatGPT/Codex mobile auth support.
 - A production-ready remote sandbox runner, until it exists and is tested.
 - Local execution capabilities that mobile OS rules do not permit.
+- Automatic approval of app-server command, write, network, or permission requests.

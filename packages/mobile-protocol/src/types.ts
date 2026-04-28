@@ -66,7 +66,15 @@ export type StartJobRequest = {
   environmentId?: string;
 };
 
-export type RunnerJobStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+export type RunnerJobStatus =
+  | "queued"
+  | "running"
+  | "awaitingApproval"
+  | "completed"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "canceled";
 
 export type RunnerMode = "fake" | "codex-app-server";
 
@@ -101,9 +109,12 @@ export type RunnerLogEvent = {
   sequence: number;
   stream: RunnerLogStream;
   level: RunnerLogLevel;
+  category?: RunnerEventCategory;
   message: string;
   createdAt: IsoTimestamp;
 };
+
+export type RunnerEventCategory = "agentText" | "plan" | "diff" | "approval" | "tool" | "error" | "completion" | "system";
 
 export type ArtifactKind = "webPreview" | "testReport" | "apk" | "aab" | "iosBuildLog" | "other";
 
@@ -125,19 +136,35 @@ export type PatchHunk = {
 export type PatchFileChange = {
   oldPath: string;
   newPath: string;
+  changeKind?: PatchFileChangeKind;
+  unsupportedReason?: string;
   hunks: PatchHunk[];
 };
+
+export type PatchFileChangeKind = "added" | "modified" | "deleted" | "unsupported";
 
 export type PatchFile = PatchFileChange;
 
 export type PatchProposal = {
   id: string;
   sessionId: string;
+  jobId?: string;
+  source?: PatchSource;
+  appServerThreadId?: string;
+  appServerTurnId?: string;
   summary: string;
   unifiedDiff: string;
   files: PatchFileChange[];
+  filesChanged?: number;
+  unsupportedChanges?: number;
+  status?: PatchLifecycleStatus;
+  metadata?: Record<string, string>;
   createdAt: IsoTimestamp;
 };
+
+export type PatchSource = "fake" | "codex-app-server";
+
+export type PatchLifecycleStatus = "none" | "available" | "unsupported" | "applied" | "rejected" | "failedToApply";
 
 export type ReceivePatchRequest = {
   patchId?: string;
@@ -154,9 +181,25 @@ export type ReceivePatchResponse = {
 export type RunnerPatchEvent = {
   type: "runner.patch";
   sessionId: string;
+  jobId?: string;
   patchId: string;
+  source?: PatchSource;
   summary: string;
   unifiedDiff: string;
+  filesChanged?: number;
+  unsupportedChanges?: number;
+  status?: PatchLifecycleStatus;
+  createdAt: IsoTimestamp;
+};
+
+export type RunnerApprovalRequestEvent = {
+  type: "runner.approvalRequest";
+  sessionId: string;
+  jobId: string;
+  requestId: string | number;
+  approvalId?: string;
+  approvalKind: "command" | "fileChange" | "permissions" | "tool" | "mcp" | "auth" | "legacy" | "unknown";
+  summary: string;
   createdAt: IsoTimestamp;
 };
 
@@ -172,7 +215,12 @@ export type RunnerArtifactEvent = {
   artifact: BuildArtifact;
 };
 
-export type RunnerEvent = RunnerLogEvent | RunnerPatchEvent | RunnerJobStatusEvent | RunnerArtifactEvent;
+export type RunnerEvent =
+  | RunnerLogEvent
+  | RunnerPatchEvent
+  | RunnerJobStatusEvent
+  | RunnerArtifactEvent
+  | RunnerApprovalRequestEvent;
 
 export type BuildArtifact = {
   id: string;
