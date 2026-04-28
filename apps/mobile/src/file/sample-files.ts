@@ -37,6 +37,28 @@ This sample project lives inside the app workspace. Build and test commands run 
   },
 ];
 
+export const fakeGitWorkspaceFiles: WorkspaceTextFile[] = [
+  {
+    path: "package.json",
+    text: `{"scripts":{"test":"node --test","build":"echo build"}}
+`,
+  },
+  {
+    path: "README.md",
+    text: `# Codex Mobile Sample
+
+Imported through fake Git provider.
+`,
+  },
+  {
+    path: "src/App.tsx",
+    text: `export function App() {
+  return 'Codex Mobile Sample';
+}
+`,
+  },
+];
+
 export function makeProjectSnapshot(files: WorkspaceTextFile[]): ProjectSnapshot {
   return {
     files: files.map((file) => ({

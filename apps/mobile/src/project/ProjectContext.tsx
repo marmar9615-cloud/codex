@@ -1,20 +1,25 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { applyPatchProposalToTextWorkspace, normalizeWorkspaceRelativePath } from "@codex/mobile-protocol";
 import type {
   BuildArtifact,
   BuildJobRequest,
+  GitChangeSummary,
+  GitCommitResult,
+  GitPushResult,
+  GitRepositorySummary,
   MobileProject,
   MobileSession,
   PatchProposal,
+  PullRequestPlan,
   RunnerCapabilitiesResponse,
   RunnerJob,
   SandboxCommandKind,
 } from "@codex/mobile-protocol";
-import { findWorkspaceTextFile, makeProjectSnapshot, sampleWorkspaceFiles, updateWorkspaceTextFile } from "@/file/sample-files";
+import { fakeGitWorkspaceFiles, findWorkspaceTextFile, makeProjectSnapshot, sampleWorkspaceFiles, updateWorkspaceTextFile } from "@/file/sample-files";
 import type { WorkspaceTextFile } from "@/file/sample-files";
 import { createSampleWorkspaceProject } from "@/file/sample-workspace";
-import { deleteWorkspacePath, writeWorkspaceText } from "@/file/workspace-provider";
+import { deleteWorkspacePath, ensureAppWorkspace, writeWorkspaceText } from "@/file/workspace-provider";
 import { getLatestJob, MobileRunnerClient } from "@/runner/runner-client";
 import type { RunnerFlowResult } from "@/runner/runner-client";
 
@@ -36,6 +41,11 @@ type ProjectContextValue = {
   patch: PatchProposal | null;
   artifacts: BuildArtifact[];
   runnerCapabilities: RunnerCapabilitiesResponse | null;
+  gitRepositories: GitRepositorySummary[];
+  gitStatus: GitChangeSummary[];
+  gitCommitResult: GitCommitResult | null;
+  gitPushResult: GitPushResult | null;
+  pullRequestPlan: PullRequestPlan | null;
   runnerLogs: string[];
   chatMessages: ChatMessage[];
   flowStatus: RunnerFlowStatus;
@@ -49,6 +59,11 @@ type ProjectContextValue = {
   runRunnerFlow(prompt: string): Promise<RunnerFlowResult | null>;
   runBuildJob(commandKind: SandboxCommandKind): Promise<RunnerFlowResult | null>;
   refreshRunnerCapabilities(): Promise<void>;
+  refreshGitRepositories(): Promise<void>;
+  importGitHubRepository(owner: string, repo: string, branch?: string): Promise<MobileProject | null>;
+  commitActiveWorkspace(message: string): Promise<GitCommitResult | null>;
+  pushActiveBranch(): Promise<GitPushResult | null>;
+  createPullRequestPlan(): Promise<PullRequestPlan | null>;
   applyPatchDecision(accepted: boolean): Promise<void>;
   clearError(): void;
 };
@@ -76,6 +91,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [patch, setPatch] = useState<PatchProposal | null>(null);
   const [artifacts, setArtifacts] = useState<BuildArtifact[]>([]);
   const [runnerCapabilities, setRunnerCapabilities] = useState<RunnerCapabilitiesResponse | null>(null);
+  const [gitRepositories, setGitRepositories] = useState<GitRepositorySummary[]>([]);
+  const [gitStatus, setGitStatus] = useState<GitChangeSummary[]>([]);
+  const [gitCommitResult, setGitCommitResult] = useState<GitCommitResult | null>(null);
+  const [gitPushResult, setGitPushResult] = useState<GitPushResult | null>(null);
+  const [pullRequestPlan, setPullRequestPlan] = useState<PullRequestPlan | null>(null);
   const [runnerLogs, setRunnerLogs] = useState<string[]>(["runner: idle"]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { role: "agent", text: "Open the sample project, edit files locally, then ask the runner for a safe build/test pass." },
@@ -96,9 +116,25 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [runnerClient]);
 
+  const refreshGitRepositories = useCallback(async () => {
+    try {
+      const capabilities = await runnerClient.getGitCapabilities();
+      if (!capabilities.available || !capabilities.supportsRepoImport) {
+        setGitRepositories([]);
+        return;
+      }
+      setGitRepositories(await runnerClient.listGitRepositories());
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "unknown Git provider error";
+      setGitRepositories([]);
+      setRunnerLogs((current) => [...current, `git provider unavailable: ${message}`]);
+    }
+  }, [runnerClient]);
+
   useEffect(() => {
     void refreshRunnerCapabilities();
-  }, [refreshRunnerCapabilities]);
+    void refreshGitRepositories();
+  }, [refreshGitRepositories, refreshRunnerCapabilities]);
 
   const createSampleProject = useCallback(async (): Promise<MobileProject> => {
     setError(null);
@@ -112,6 +148,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     setJob(null);
     setPatch(null);
     setArtifacts([]);
+    setGitStatus([]);
+    setGitCommitResult(null);
+    setGitPushResult(null);
+    setPullRequestPlan(null);
     setRunnerLogs(["runner: sample workspace created"]);
     setPatchDecision("pending");
     return project;
@@ -138,8 +178,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         return;
       }
       setFiles((current) => updateWorkspaceTextFile(current, activeFile.path, text));
+      markProjectDirty(activeProject?.id, setProjects, setActiveProject);
     },
-    [activeFile],
+    [activeFile, activeProject],
   );
 
   const saveActiveFile = useCallback(async () => {
@@ -148,7 +189,66 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
     await writeWorkspaceText(activeProject.workspaceUri, activeFile.path, activeFile.text);
     setRunnerLogs((current) => [...current, `workspace: saved ${activeFile.path}`]);
+    markProjectDirty(activeProject.id, setProjects, setActiveProject);
   }, [activeFile, activeProject]);
+
+  const importGitHubRepository = useCallback(
+    async (owner: string, repo: string, branch?: string): Promise<MobileProject | null> => {
+      setError(null);
+      try {
+        await refreshRunnerCapabilities();
+        const projectId = `github-${owner}-${repo}`;
+        const workspaceUri = await ensureAppWorkspace(projectId);
+        const created = await runnerClient.createSession({
+          projectId,
+          projectName: `${owner}/${repo}`,
+          sourceKind: "github",
+        });
+        const imported = await runnerClient.importGitHubRepository(created.session.id, { owner, repo, branch });
+        const featureBranch = await runnerClient.createGitBranch(created.session.id, `codex/mobile-${created.session.id}`);
+        const importedFiles = cloneFakeGitFiles();
+        await Promise.all(importedFiles.map((file) => writeWorkspaceText(workspaceUri, file.path, file.text)));
+        const project: MobileProject = {
+          id: projectId,
+          name: imported.repository.fullName,
+          sourceKind: "github",
+          workspaceUri,
+          lastOpenedAt: new Date().toISOString(),
+          runnerSessionId: created.session.id,
+          workspaceSource: {
+            ...imported.workspaceSource,
+            branch: featureBranch.name,
+          },
+          branchName: featureBranch.name,
+          dirty: false,
+        };
+        setProjects((current) => upsertProject(current, project));
+        setActiveProject(project);
+        setFiles(importedFiles);
+        setActivePath("src/App.tsx");
+        setSession(created.session);
+        setJob(null);
+        setPatch(null);
+        setArtifacts([]);
+        setGitStatus([]);
+        setGitCommitResult(null);
+        setGitPushResult(null);
+        setPullRequestPlan(null);
+        setRunnerLogs((current) => [
+          ...current,
+          `git: imported ${imported.repository.fullName} from ${imported.branch.name}`,
+          `git: created feature branch ${featureBranch.name}`,
+        ]);
+        return project;
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : "unknown Git import error";
+        setError(message);
+        setRunnerLogs((current) => [...current, `git import error: ${message}`]);
+        return null;
+      }
+    },
+    [refreshRunnerCapabilities, runnerClient],
+  );
 
   const runRunnerFlow = useCallback(
     async (prompt: string): Promise<RunnerFlowResult | null> => {
@@ -328,6 +428,96 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     [activeProject, createSampleProject, files, refreshRunnerCapabilities, runnerClient, session],
   );
 
+  const commitActiveWorkspace = useCallback(
+    async (message: string): Promise<GitCommitResult | null> => {
+      setError(null);
+      if (!activeProject || !session) {
+        setError("Import or open a runner-backed project before committing.");
+        return null;
+      }
+      const trimmedMessage = message.trim();
+      if (!trimmedMessage) {
+        setError("Commit message is required.");
+        return null;
+      }
+      try {
+        await runnerClient.uploadSnapshot(session.id, makeProjectSnapshot(files));
+        const changes = await runnerClient.getGitStatus(session.id);
+        setGitStatus(changes);
+        const result = await runnerClient.commitGitChanges(session.id, {
+          message: trimmedMessage,
+          branchName: activeProject.branchName ?? `codex/mobile-${session.id}`,
+        });
+        setGitCommitResult(result);
+        setGitPushResult(null);
+        setPullRequestPlan(null);
+        setProjects((current) =>
+          current.map((project) =>
+            project.id === activeProject.id
+              ? withGitCommitMetadata(project, result)
+              : project,
+          ),
+        );
+        setActiveProject((current) =>
+          current && current.id === activeProject.id
+            ? withGitCommitMetadata(current, result)
+            : current,
+        );
+        setRunnerLogs((current) => [...current, `git: committed ${result.changedFiles.length} file(s) to ${result.branchName}`]);
+        return result;
+      } catch (caught) {
+        const errorMessage = caught instanceof Error ? caught.message : "unknown Git commit error";
+        setError(errorMessage);
+        setRunnerLogs((current) => [...current, `git commit error: ${errorMessage}`]);
+        return null;
+      }
+    },
+    [activeProject, files, runnerClient, session],
+  );
+
+  const pushActiveBranch = useCallback(async (): Promise<GitPushResult | null> => {
+    setError(null);
+    if (!activeProject || !session) {
+      setError("Import or open a runner-backed project before pushing.");
+      return null;
+    }
+    const branchName = activeProject.branchName ?? activeProject.workspaceSource?.branch;
+    if (!branchName) {
+      setError("Create or select a feature branch before pushing.");
+      return null;
+    }
+    try {
+      const result = await runnerClient.pushGitBranch(session.id, { branchName, force: false });
+      setGitPushResult(result);
+      setRunnerLogs((current) => [...current, `git: pushed ${result.branchName}`]);
+      return result;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "unknown Git push error";
+      setError(message);
+      setRunnerLogs((current) => [...current, `git push error: ${message}`]);
+      return null;
+    }
+  }, [activeProject, runnerClient, session]);
+
+  const createPullRequestPlan = useCallback(async (): Promise<PullRequestPlan | null> => {
+    setError(null);
+    if (!session) {
+      setError("Import or open a runner-backed project before preparing a PR plan.");
+      return null;
+    }
+    try {
+      const plan = await runnerClient.createPullRequestPlan(session.id);
+      setPullRequestPlan(plan);
+      setRunnerLogs((current) => [...current, `git: prepared PR plan for ${plan.headBranch}`]);
+      return plan;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "unknown PR plan error";
+      setError(message);
+      setRunnerLogs((current) => [...current, `git PR plan error: ${message}`]);
+      return null;
+    }
+  }, [runnerClient, session]);
+
   const applyPatchDecision = useCallback(
     async (accepted: boolean) => {
       if (!accepted) {
@@ -366,6 +556,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
             }
           }
         }
+        markProjectDirty(activeProject?.id, setProjects, setActiveProject);
         setPatchDecision("accepted");
         setActivePath(result.files.find((file) => changedPaths.has(file.path))?.path ?? activePath);
         setChatMessages((current) => [...current, { role: "agent", text: `Patch applied to ${changedPaths.size} file(s).` }]);
@@ -390,6 +581,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       patch,
       artifacts,
       runnerCapabilities,
+      gitRepositories,
+      gitStatus,
+      gitCommitResult,
+      gitPushResult,
+      pullRequestPlan,
       runnerLogs,
       chatMessages,
       flowStatus,
@@ -403,6 +599,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       runRunnerFlow,
       runBuildJob,
       refreshRunnerCapabilities,
+      refreshGitRepositories,
+      importGitHubRepository,
+      commitActiveWorkspace,
+      pushActiveBranch,
+      createPullRequestPlan,
       applyPatchDecision,
       clearError: () => setError(null),
     }),
@@ -417,6 +618,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       patch,
       artifacts,
       runnerCapabilities,
+      gitRepositories,
+      gitStatus,
+      gitCommitResult,
+      gitPushResult,
+      pullRequestPlan,
       runnerLogs,
       chatMessages,
       flowStatus,
@@ -429,6 +635,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       runRunnerFlow,
       runBuildJob,
       refreshRunnerCapabilities,
+      refreshGitRepositories,
+      importGitHubRepository,
+      commitActiveWorkspace,
+      pushActiveBranch,
+      createPullRequestPlan,
       applyPatchDecision,
     ],
   );
@@ -448,6 +659,10 @@ function cloneSampleFiles(): WorkspaceTextFile[] {
   return sampleWorkspaceFiles.map((file) => ({ ...file }));
 }
 
+function cloneFakeGitFiles(): WorkspaceTextFile[] {
+  return fakeGitWorkspaceFiles.map((file) => ({ ...file }));
+}
+
 function upsertProject(projects: MobileProject[], project: MobileProject): MobileProject[] {
   const existing = projects.some((candidate) => candidate.id === project.id);
   if (existing) {
@@ -462,6 +677,32 @@ function upsertArtifact(artifacts: BuildArtifact[], artifact: BuildArtifact): Bu
     return artifacts.map((candidate) => (candidate.id === artifact.id ? artifact : candidate));
   }
   return [...artifacts, artifact];
+}
+
+function markProjectDirty(
+  projectId: string | undefined,
+  setProjects: Dispatch<SetStateAction<MobileProject[]>>,
+  setActiveProject: Dispatch<SetStateAction<MobileProject | null>>,
+): void {
+  if (!projectId) {
+    return;
+  }
+  setProjects((current) => current.map((project) => (project.id === projectId ? { ...project, dirty: true } : project)));
+  setActiveProject((current) => (current && current.id === projectId ? { ...current, dirty: true } : current));
+}
+
+function withGitCommitMetadata(project: MobileProject, result: GitCommitResult): MobileProject {
+  return {
+    ...project,
+    branchName: result.branchName,
+    workspaceSource: {
+      kind: project.workspaceSource?.kind ?? project.sourceKind,
+      repository: project.workspaceSource?.repository,
+      branch: result.branchName,
+      commitSha: result.commitSha,
+    },
+    dirty: false,
+  };
 }
 
 function runnerKindForSandboxCommand(commandKind: SandboxCommandKind): "build" | "test" {

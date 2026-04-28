@@ -6,12 +6,18 @@ import type {
   GetJobResponse,
   GetPatchResponse,
   GetSessionResponse,
+  GitCapabilities,
+  GitCommitResult,
+  GitImportResult,
+  GitPushResult,
+  GitRepositorySummary,
+  PullRequestPlan,
   RunnerCapabilitiesResponse,
   StartBuildJobResponse,
   StartJobResponse,
   UploadSnapshotResponse,
 } from "@codex/mobile-protocol";
-import { defaultResourceLimits, defaultSandboxCommandKinds } from "./config.js";
+import { defaultCloudLimits, defaultResourceLimits, defaultSandboxCommandKinds } from "./config.js";
 import { startMobileRunner } from "./server.js";
 
 test("runner API covers session, snapshot, job, logs, patch, and artifacts endpoints", async () => {
@@ -34,6 +40,12 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
     assert.equal(capabilities.fakeRunner, true);
     assert.equal(capabilities.activeSandboxBackend, "fake");
     assert.deepEqual(capabilities.sandboxBackends, ["fake"]);
+    assert.equal(capabilities.gitProvider, "fake");
+    assert.equal(capabilities.gitProviderAvailable, true);
+    assert.equal(capabilities.secretsInMobile, false);
+    assert.equal(capabilities.cloudRunnerProvider, "fake");
+    assert.equal(capabilities.cloudRunnerAvailable, true);
+    assert.equal(capabilities.runnerAuthMode, "dev");
     assert.equal(capabilities.phoneSideExecution, false);
     assert.equal(capabilities.productionOAuthEnabled, false);
 
@@ -104,6 +116,129 @@ test("runner API covers session, snapshot, job, logs, patch, and artifacts endpo
   }
 });
 
+test("runner API covers fake GitHub workspace import, branch, status, commit, push, and PR plan", async () => {
+  const { server, url } = await startMobileRunner({
+    port: 0,
+    now: () => "2026-04-28T20:00:00.000Z",
+  });
+  try {
+    const created = await post<CreateSessionResponse>(url, "/sessions", {
+      projectId: "project-1",
+      projectName: "Codex Mobile",
+      sourceKind: "appWorkspace",
+    });
+
+    const gitCapabilities = await get<GitCapabilities>(url, "/git/capabilities");
+    assert.equal(gitCapabilities.provider, "fake");
+    assert.equal(gitCapabilities.secretsInMobile, false);
+
+    const repos = await get<{ repositories: GitRepositorySummary[] }>(url, "/git/repositories");
+    assert.equal(repos.repositories[0]?.fullName, "openai/codex-mobile-sample");
+
+    const branches = await get<{ branches: unknown[] }>(url, "/git/repositories/openai/codex-mobile-sample/branches");
+    assert.equal(branches.branches.length, 2);
+
+    const imported = await post<GitImportResult>(url, `/sessions/${created.session.id}/import/github`, {
+      owner: "openai",
+      repo: "codex-mobile-sample",
+      branch: "main",
+    });
+    assert.equal(imported.workspaceSource.kind, "github");
+    assert.equal(imported.importedFiles, 3);
+
+    const branch = await post<{ branch: { name: string } }>(url, `/sessions/${created.session.id}/git/branch`, {
+      branchName: "codex/mobile-test",
+    });
+    assert.equal(branch.branch.name, "codex/mobile-test");
+
+    const status = await get<{ changes: Array<{ path: string; status: string }> }>(url, `/sessions/${created.session.id}/git/status`);
+    assert.ok(status.changes.some((change) => change.path === "src/App.tsx"));
+
+    const commit = await post<GitCommitResult>(url, `/sessions/${created.session.id}/git/commit`, {
+      message: "Apply mobile Codex patch",
+      branchName: "codex/mobile-test",
+    });
+    assert.equal(commit.branchName, "codex/mobile-test");
+    assert.match(commit.commitSha, /^fakecommit/);
+
+    const push = await post<GitPushResult>(url, `/sessions/${created.session.id}/git/push`, {
+      branchName: "codex/mobile-test",
+    });
+    assert.equal(push.pushed, true);
+    assert.equal(push.branchName, "codex/mobile-test");
+    assert.ok(!JSON.stringify(push).includes("token"));
+
+    const prPlan = await post<PullRequestPlan>(url, `/sessions/${created.session.id}/git/pr-plan`, {});
+    assert.equal(prPlan.provider, "fake");
+    assert.equal(prPlan.ready, true);
+    assert.match(prPlan.deepLinkUrl ?? "", /quick_pull=1/);
+  } finally {
+    server.close();
+  }
+});
+
+test("runner API rejects unsafe Git pushes and keeps GitHub App secrets server-side", async () => {
+  const { server, url } = await startMobileRunner({ port: 0 });
+  try {
+    const created = await post<CreateSessionResponse>(url, "/sessions", {
+      projectId: "project-1",
+      projectName: "Codex Mobile",
+      sourceKind: "appWorkspace",
+    });
+    await post<GitImportResult>(url, `/sessions/${created.session.id}/import/github`, {
+      owner: "openai",
+      repo: "codex-mobile-sample",
+    });
+    const forceResponse = await fetch(`${url}/sessions/${created.session.id}/git/push`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branchName: "codex/mobile-test", force: true }),
+    });
+    assert.equal(forceResponse.status, 400);
+    assert.match(JSON.stringify(await forceResponse.json()), /git_force_push_rejected/);
+  } finally {
+    server.close();
+  }
+
+  const secret = "TEST_PRIVATE_KEY_SHOULD_NOT_LEAK";
+  const configuredServer = await startMobileRunner({
+    port: 0,
+    config: {
+      defaultMode: "fake",
+      runnerMode: "fake",
+      codexAppServerBin: "codex",
+      codexAppServerTransport: "stdio",
+      codexAppServerTimeoutMs: 100,
+      supportedTransports: ["stdio"],
+      sandboxBackend: "fake",
+      dockerImage: "node:22-bookworm-slim",
+      dockerNetworkMode: "none",
+      enableUnsafeCustomCommands: false,
+      commandKinds: defaultSandboxCommandKinds,
+      resourceLimits: defaultResourceLimits,
+      gitProvider: "github-app",
+      gitHubAppConfigured: true,
+      gitAllowedOwnerAllowlist: ["openai"],
+      cloudRunnerProvider: "fake",
+      cloudLimits: defaultCloudLimits,
+      runnerAuthMode: "dev",
+    },
+  });
+  try {
+    const capabilities = await get<RunnerCapabilitiesResponse>(configuredServer.url, "/capabilities");
+    assert.equal(capabilities.gitProvider, "github-app");
+    assert.equal(capabilities.secretsInMobile, false);
+    assert.ok(!JSON.stringify(capabilities).includes(secret));
+    const response = await fetch(`${configuredServer.url}/git/repositories`);
+    const body = JSON.stringify(await response.json());
+    assert.equal(response.status, 503);
+    assert.ok(!body.includes(secret));
+    assert.match(body, /git_provider_unavailable/);
+  } finally {
+    configuredServer.server.close();
+  }
+});
+
 test("runner API starts a sandbox build job through the fake backend", async () => {
   const { server, url } = await startMobileRunner({
     port: 0,
@@ -164,6 +299,12 @@ test("codex-app-server mode reports missing binary as a structured runner error"
       enableUnsafeCustomCommands: false,
       commandKinds: defaultSandboxCommandKinds,
       resourceLimits: defaultResourceLimits,
+      gitProvider: "fake",
+      gitHubAppConfigured: false,
+      gitAllowedOwnerAllowlist: [],
+      cloudRunnerProvider: "fake",
+      cloudLimits: defaultCloudLimits,
+      runnerAuthMode: "dev",
     },
   });
   try {
@@ -209,6 +350,12 @@ test("local-docker sandbox mode reports unavailable Docker before streaming", as
       enableUnsafeCustomCommands: false,
       commandKinds: defaultSandboxCommandKinds,
       resourceLimits: defaultResourceLimits,
+      gitProvider: "fake",
+      gitHubAppConfigured: false,
+      gitAllowedOwnerAllowlist: [],
+      cloudRunnerProvider: "fake",
+      cloudLimits: defaultCloudLimits,
+      runnerAuthMode: "dev",
     },
   });
   try {

@@ -52,6 +52,8 @@ Status: planning and configuration prep only. Do not upload, submit, or modify r
 - Do not request broad all-files access by default.
 - Do not claim broad phone filesystem access.
 - Do not claim heavy builds/tests run locally on Android.
+- Do not claim production GitHub App import/push or production cloud sandboxing until those server-side systems are implemented and tested.
+- Do not include GitHub App private keys, installation tokens, service-account JSON, or cloud credentials in the mobile app or Expo public config.
 - Do not upload to Play internal testing or production without explicit confirmation.
 
 ## Review Notes Draft
@@ -59,6 +61,8 @@ Status: planning and configuration prep only. Do not upload, submit, or modify r
 Codex Mobile uses app-specific storage by default and user-selected files/folders through supported Android document access flows. The app does not request broad all-files access by default. Users review and approve every agent patch before workspace files are changed. Heavy builds, tests, and package installation run in runner-side sandbox environments rather than on the phone. Raw arbitrary shell commands are disabled by default.
 
 Important distinction: EAS Build creates Codex Mobile's own Android App Bundle for Google Play. The mobile runner sandbox runs users' project build/test commands outside the phone. These are separate systems.
+
+GitHub workflows are branch-first and server-mediated. The Android app does not store GitHub installation tokens, private keys, passwords, personal access tokens, service-account JSON, or cloud runner credentials.
 
 ## EAS Build And Internal Testing Commands
 

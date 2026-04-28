@@ -10,7 +10,8 @@ Status: requirements checklist only. This is not legal advice and is not a priva
 - Source file contents uploaded to a remote sandbox runner.
 - Runner logs, build/test results, patch proposals, and artifact metadata.
 - Diagnostics, crash logs, and device/app metadata if analytics or crash reporting are later added.
-- Git provider identity and repository metadata if GitHub import/push is later implemented.
+- Git provider identity, repository metadata, branch names, commit metadata, and PR-plan metadata if GitHub import/push is enabled.
+- Audit logs, quota records, artifact records, and cleanup metadata if cloud runner control-plane persistence is enabled.
 
 ## What Codex Can Automate
 
@@ -26,6 +27,7 @@ Status: requirements checklist only. This is not legal advice and is not a priva
 - Complete Apple App Privacy answers in App Store Connect.
 - Complete Google Play Data Safety answers in Play Console.
 - Keep privacy answers current when auth, analytics, runner hosting, GitHub integration, or crash reporting changes.
+- Confirm whether GitHub App installation data, repository contents, branch names, commit metadata, and PR links are stored or retained by the runner.
 
 ## Values To Provide Later
 
@@ -34,6 +36,8 @@ Status: requirements checklist only. This is not legal advice and is not a priva
 - Legal entity / publisher name.
 - Data retention and deletion process.
 - Runner hosting provider and region choices.
+- GitHub App data retention and deletion process, if enabled.
+- Cloud runner artifact storage provider and retention period, if enabled.
 - Analytics/crash reporting provider choices, if any.
 
 ## What Must Not Be Faked
@@ -43,4 +47,5 @@ Status: requirements checklist only. This is not legal advice and is not a priva
 - Do not omit third-party SDK data flows.
 - Do not treat dev-only API-key mode as the normal user auth flow.
 - Do not claim local-only execution while remote runner upload is enabled.
-
+- Do not claim mobile stores no GitHub data if repository metadata, branch names, or PR-plan metadata are displayed or cached.
+- Do not imply cloud runner audit/artifact records are ephemeral unless cleanup and retention are actually implemented.

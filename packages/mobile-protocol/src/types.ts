@@ -2,6 +2,13 @@ export type IsoTimestamp = string;
 
 export type ProjectSourceKind = "appWorkspace" | "github" | "documentPicker" | "androidSaf" | "iosSecurityScoped";
 
+export type WorkspaceSource = {
+  kind: ProjectSourceKind;
+  repository?: GitRepositorySummary;
+  branch?: string;
+  commitSha?: string;
+};
+
 export type MobileProject = {
   id: string;
   name: string;
@@ -9,6 +16,9 @@ export type MobileProject = {
   workspaceUri: string;
   lastOpenedAt: IsoTimestamp;
   runnerSessionId?: string;
+  workspaceSource?: WorkspaceSource;
+  branchName?: string;
+  dirty?: boolean;
 };
 
 export type RunnerSessionStatus = "created" | "syncing" | "ready" | "running" | "failed" | "closed";
@@ -339,6 +349,18 @@ export type RunnerCapabilitiesResponse = {
   maxJobDurationMs: number;
   maxLogBytes: number;
   unsafeCustomCommandsEnabled: boolean;
+  gitProvider: GitProviderMode;
+  gitProviderAvailable: boolean;
+  gitHubAppConfigured: boolean;
+  supportsRepoImport: boolean;
+  supportsCommit: boolean;
+  supportsPush: boolean;
+  supportsPullRequestPlan: boolean;
+  secretsInMobile: false;
+  cloudRunnerProvider: CloudRunnerProviderMode;
+  cloudRunnerAvailable: boolean;
+  cloudLimits: CloudQuotaLimits;
+  runnerAuthMode: RunnerAuthMode;
   productionOAuthEnabled: false;
   remoteSandboxExecution: boolean;
   phoneSideExecution: false;
@@ -368,4 +390,158 @@ export type MobileAuthProvider = "chatgpt" | "devApiKey";
 export type MobileAuthConfig = {
   chatgptAccountAuthEnabled: boolean;
   devApiKeyAuthEnabled: boolean;
+};
+
+export type GitProviderMode = "fake" | "local-git" | "github-app";
+
+export type GitCapabilities = {
+  provider: GitProviderMode;
+  available: boolean;
+  gitHubAppConfigured: boolean;
+  supportsRepoImport: boolean;
+  supportsCommit: boolean;
+  supportsPush: boolean;
+  supportsPullRequestPlan: boolean;
+  secretsInMobile: false;
+};
+
+export type GitRepositorySummary = {
+  id: string;
+  owner: string;
+  name: string;
+  fullName: string;
+  defaultBranch: string;
+  private: boolean;
+  htmlUrl?: string;
+};
+
+export type GitBranchSummary = {
+  name: string;
+  sha: string;
+  protected?: boolean;
+};
+
+export type GitImportRequest = {
+  owner: string;
+  repo: string;
+  branch?: string;
+};
+
+export type GitImportResult = {
+  sessionId: string;
+  repository: GitRepositorySummary;
+  branch: GitBranchSummary;
+  workspaceSource: WorkspaceSource;
+  importedFiles: number;
+};
+
+export type GitChangeSummary = {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed" | "unchanged";
+};
+
+export type GitCommitRequest = {
+  message: string;
+  branchName?: string;
+};
+
+export type GitCommitResult = {
+  sessionId: string;
+  commitSha: string;
+  branchName: string;
+  message: string;
+  changedFiles: GitChangeSummary[];
+};
+
+export type GitPushRequest = {
+  branchName: string;
+  force?: boolean;
+};
+
+export type GitPushResult = {
+  sessionId: string;
+  branchName: string;
+  remoteName: string;
+  pushed: boolean;
+  commitSha?: string;
+  remoteUrl?: string;
+};
+
+export type PullRequestPlan = {
+  sessionId: string;
+  title: string;
+  body: string;
+  headBranch: string;
+  baseBranch: string;
+  deepLinkUrl?: string;
+  provider: GitProviderMode;
+  ready: boolean;
+};
+
+export type GitProviderError = RunnerError & {
+  provider?: GitProviderMode;
+};
+
+export type GitAuthState = {
+  provider: GitProviderMode;
+  configured: boolean;
+  authenticated: boolean;
+  expiresAt?: IsoTimestamp;
+  secretsInMobile: false;
+};
+
+export type GitInstallState = {
+  provider: GitProviderMode;
+  installed: boolean;
+  installationId?: string;
+  ownerAllowlist?: string[];
+};
+
+export type GitAuditEvent = {
+  id: string;
+  type:
+    | "session.created"
+    | "repo.imported"
+    | "job.started"
+    | "job.completed"
+    | "job.failed"
+    | "job.cancelled"
+    | "patch.applied"
+    | "patch.rejected"
+    | "commit.created"
+    | "push.requested"
+    | "push.completed"
+    | "push.failed"
+    | "artifact.created"
+    | "artifact.deleted";
+  sessionId?: string;
+  jobId?: string;
+  actorId?: string;
+  message: string;
+  createdAt: IsoTimestamp;
+  metadata?: Record<string, string>;
+};
+
+export type CloudRunnerProviderMode = "fake" | "none" | "aws-fargate" | "gcp-cloud-run-jobs" | "fly-machines" | "kubernetes";
+
+export type CloudQuotaLimits = {
+  maxJobsPerSession: number;
+  maxConcurrentJobs: number;
+  maxDurationMs: number;
+  maxWorkspaceBytes: number;
+  maxArtifactBytes: number;
+};
+
+export type CloudRunnerCapabilities = {
+  provider: CloudRunnerProviderMode;
+  available: boolean;
+  limits: CloudQuotaLimits;
+};
+
+export type RunnerAuthMode = "dev" | "jwt" | "session";
+
+export type RunnerIdentity = {
+  actorId: string;
+  authMode: RunnerAuthMode;
+  devMode: boolean;
 };

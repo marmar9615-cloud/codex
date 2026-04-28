@@ -123,6 +123,33 @@ export function SettingsAuthScreen() {
           </Text>
           <ActionButton onPress={() => void refreshRunnerCapabilities()}>Refresh Capabilities</ActionButton>
         </View>
+
+        <View
+          style={{
+            backgroundColor: colors.surface,
+            borderColor: colors.border,
+            borderWidth: 1,
+            borderRadius: 8,
+            padding: spacing.md,
+            gap: spacing.sm,
+          }}
+        >
+          <Text selectable style={{ color: colors.text, fontWeight: "800" }}>
+            GitHub workspace provider
+          </Text>
+          <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            Production GitHub connect requires a server-side GitHub App. The mobile app does not collect GitHub
+            passwords or personal access tokens, and it does not store installation tokens.
+          </Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+            <StatusPill label={`provider: ${runnerCapabilities?.gitProvider ?? "unknown"}`} tone={runnerCapabilities?.gitProviderAvailable ? "ready" : "warning"} />
+            <StatusPill label={runnerCapabilities?.gitHubAppConfigured ? "app configured" : "app gated"} tone={runnerCapabilities?.gitHubAppConfigured ? "ready" : "warning"} />
+            <StatusPill label={runnerCapabilities?.secretsInMobile === false ? "no mobile secrets" : "check secrets"} tone="ready" />
+          </View>
+          <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            The default workflow creates a feature branch, requires explicit commit/push approval, and prepares PR metadata instead of pushing to main.
+          </Text>
+        </View>
       </Screen>
     </>
   );

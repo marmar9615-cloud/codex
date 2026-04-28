@@ -1,4 +1,4 @@
-import { Stack } from "expo-router";
+import { Link, Stack } from "expo-router";
 import { Text, View } from "react-native";
 import { ActionButton } from "@/components/ActionButton";
 import { Screen } from "@/components/Screen";
@@ -117,6 +117,11 @@ export function DiffReviewScreen() {
           >
             Reject Patch
           </ActionButton>
+          {patchDecision === "accepted" ? (
+            <Link href="/git" asChild>
+              <ActionButton>Commit to Branch</ActionButton>
+            </Link>
+          ) : null}
         </View>
       </Screen>
     </>

@@ -4,8 +4,21 @@ import {
   assertBuildArtifact,
   assertBuildJobRequest,
   assertBuildJobResult,
+  assertCloudRunnerCapabilities,
   assertCommandPolicyViolation,
   assertCreateSessionRequest,
+  assertGitAuditEvent,
+  assertGitAuthState,
+  assertGitCapabilities,
+  assertGitCommitRequest,
+  assertGitCommitResult,
+  assertGitImportRequest,
+  assertGitImportResult,
+  assertGitInstallState,
+  assertGitProviderError,
+  assertGitPushRequest,
+  assertGitPushResult,
+  assertGitRepositorySummary,
   assertMobileSession,
   assertPatchProposal,
   assertProjectSnapshot,
@@ -16,6 +29,7 @@ import {
   assertRunnerLogEvent,
   assertSandboxError,
   assertStartJobRequest,
+  assertPullRequestPlan,
 } from "./validation.js";
 
 const timestamp = "2026-04-28T20:00:00.000Z";
@@ -164,6 +178,24 @@ test("validates runner capabilities payloads", () => {
       maxJobDurationMs: 120000,
       maxLogBytes: 1048576,
       unsafeCustomCommandsEnabled: false,
+      gitProvider: "fake",
+      gitProviderAvailable: true,
+      gitHubAppConfigured: false,
+      supportsRepoImport: true,
+      supportsCommit: true,
+      supportsPush: true,
+      supportsPullRequestPlan: true,
+      secretsInMobile: false,
+      cloudRunnerProvider: "fake",
+      cloudRunnerAvailable: true,
+      cloudLimits: {
+        maxJobsPerSession: 20,
+        maxConcurrentJobs: 2,
+        maxDurationMs: 120000,
+        maxWorkspaceBytes: 52428800,
+        maxArtifactBytes: 10485760,
+      },
+      runnerAuthMode: "dev",
       productionOAuthEnabled: false,
       remoteSandboxExecution: false,
       phoneSideExecution: false,
@@ -182,10 +214,131 @@ test("validates runner capabilities payloads", () => {
       maxJobDurationMs: 120000,
       maxLogBytes: 1048576,
       unsafeCustomCommandsEnabled: false,
+      gitProvider: "fake",
+      gitProviderAvailable: true,
+      gitHubAppConfigured: false,
+      supportsRepoImport: true,
+      supportsCommit: true,
+      supportsPush: true,
+      supportsPullRequestPlan: true,
+      secretsInMobile: false,
+      cloudRunnerProvider: "fake",
+      cloudRunnerAvailable: true,
+      cloudLimits: {
+        maxJobsPerSession: 20,
+        maxConcurrentJobs: 2,
+        maxDurationMs: 120000,
+        maxWorkspaceBytes: 52428800,
+        maxArtifactBytes: 10485760,
+      },
+      runnerAuthMode: "dev",
       productionOAuthEnabled: false,
       remoteSandboxExecution: false,
       phoneSideExecution: false,
     },
+  );
+});
+
+test("validates git provider payloads", () => {
+  const repo = assertGitRepositorySummary({
+    id: "repo_1",
+    owner: "openai",
+    name: "codex-mobile-sample",
+    fullName: "openai/codex-mobile-sample",
+    defaultBranch: "main",
+    private: false,
+    htmlUrl: "https://github.com/openai/codex-mobile-sample",
+  });
+  assert.equal(repo.fullName, "openai/codex-mobile-sample");
+  assert.equal(
+    assertGitCapabilities({
+      provider: "fake",
+      available: true,
+      gitHubAppConfigured: false,
+      supportsRepoImport: true,
+      supportsCommit: true,
+      supportsPush: true,
+      supportsPullRequestPlan: true,
+      secretsInMobile: false,
+    }).secretsInMobile,
+    false,
+  );
+  assert.equal(assertGitImportRequest({ owner: "openai", repo: "codex-mobile-sample", branch: "main" }).branch, "main");
+  assert.equal(
+    assertGitImportResult({
+      sessionId: "mrs_0001",
+      repository: repo,
+      branch: { name: "main", sha: "abc123", protected: true },
+      workspaceSource: { kind: "github", repository: repo, branch: "main", commitSha: "abc123" },
+      importedFiles: 3,
+    }).workspaceSource.kind,
+    "github",
+  );
+  assert.equal(assertGitCommitRequest({ message: "Update app", branchName: "codex/mobile-update" }).message, "Update app");
+  assert.equal(
+    assertGitCommitResult({
+      sessionId: "mrs_0001",
+      commitSha: "def456",
+      branchName: "codex/mobile-update",
+      message: "Update app",
+      changedFiles: [{ path: "src/App.tsx", status: "modified" }],
+    }).changedFiles[0]?.status,
+    "modified",
+  );
+  assert.equal(assertGitPushRequest({ branchName: "codex/mobile-update", force: false }).force, false);
+  assert.equal(
+    assertGitPushResult({
+      sessionId: "mrs_0001",
+      branchName: "codex/mobile-update",
+      remoteName: "origin",
+      pushed: true,
+      commitSha: "def456",
+    }).pushed,
+    true,
+  );
+  assert.equal(
+    assertPullRequestPlan({
+      sessionId: "mrs_0001",
+      title: "Update app",
+      body: "Review the mobile patch.",
+      headBranch: "codex/mobile-update",
+      baseBranch: "main",
+      provider: "fake",
+      ready: true,
+    }).ready,
+    true,
+  );
+  assert.equal(assertGitProviderError({ error: "missing env", code: "git_provider_unavailable", provider: "github-app" }).provider, "github-app");
+  assert.equal(assertGitAuthState({ provider: "github-app", configured: false, authenticated: false, secretsInMobile: false }).secretsInMobile, false);
+  assert.equal(assertGitInstallState({ provider: "fake", installed: true, ownerAllowlist: ["openai"] }).installed, true);
+  assert.equal(
+    assertGitAuditEvent({
+      id: "audit_1",
+      type: "commit.created",
+      sessionId: "mrs_0001",
+      actorId: "dev-user",
+      message: "Commit created",
+      createdAt: timestamp,
+      metadata: { branch: "codex/mobile-update" },
+    }).type,
+    "commit.created",
+  );
+});
+
+test("validates cloud runner capabilities", () => {
+  assert.equal(
+    assertCloudRunnerCapabilities({
+      provider: "fake",
+      available: true,
+      limits: {
+        maxJobsPerSession: 20,
+        maxConcurrentJobs: 2,
+        maxDurationMs: 120000,
+        maxWorkspaceBytes: 52428800,
+        maxArtifactBytes: 10485760,
+      },
+    }).provider,
+    "fake",
   );
 });
 
@@ -343,6 +496,24 @@ test("rejects invalid runner payloads", () => {
         maxJobDurationMs: 120000,
         maxLogBytes: 1048576,
         unsafeCustomCommandsEnabled: false,
+        gitProvider: "fake",
+        gitProviderAvailable: true,
+        gitHubAppConfigured: false,
+        supportsRepoImport: true,
+        supportsCommit: true,
+        supportsPush: true,
+        supportsPullRequestPlan: true,
+        secretsInMobile: false,
+        cloudRunnerProvider: "fake",
+        cloudRunnerAvailable: true,
+        cloudLimits: {
+          maxJobsPerSession: 20,
+          maxConcurrentJobs: 2,
+          maxDurationMs: 120000,
+          maxWorkspaceBytes: 52428800,
+          maxArtifactBytes: 10485760,
+        },
+        runnerAuthMode: "dev",
         productionOAuthEnabled: false,
         remoteSandboxExecution: false,
         phoneSideExecution: false,

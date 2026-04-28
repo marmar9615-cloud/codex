@@ -3,8 +3,24 @@ import type {
   AppServerTransport,
   BuildJobRequest,
   BuildJobResult,
+  CloudQuotaLimits,
   CommandPolicyViolation,
   CreateSessionRequest,
+  GitAuditEvent,
+  GitAuthState,
+  GitBranchSummary,
+  GitCapabilities,
+  GitChangeSummary,
+  GitCommitRequest,
+  GitCommitResult,
+  GitImportRequest,
+  GitImportResult,
+  GitInstallState,
+  GitProviderError,
+  GitProviderMode,
+  GitPushRequest,
+  GitPushResult,
+  GitRepositorySummary,
   MobileSession,
   PackageManager,
   PatchFileChange,
@@ -25,6 +41,9 @@ import type {
   RunnerJobStatus,
   RunnerLogEvent,
   RunnerMode,
+  PullRequestPlan,
+  CloudRunnerCapabilities,
+  RunnerAuthMode,
   SandboxBackend,
   SandboxCommandKind,
   SandboxError,
@@ -54,6 +73,9 @@ const jobStatuses = new Set<RunnerJobStatus>([
 ]);
 const runnerModes = new Set<RunnerMode>(["fake", "codex-app-server"]);
 const appServerTransports = new Set<AppServerTransport>(["stdio", "unix", "local-ws"]);
+const gitProviderModes = new Set<GitProviderMode>(["fake", "local-git", "github-app"]);
+const cloudRunnerProviderModes = new Set(["fake", "none", "aws-fargate", "gcp-cloud-run-jobs", "fly-machines", "kubernetes"]);
+const runnerAuthModes = new Set<RunnerAuthMode>(["dev", "jwt", "session"]);
 const sandboxBackends = new Set<SandboxBackend>(["fake", "local-docker"]);
 const sandboxCommandKinds = new Set<SandboxCommandKind>([
   "npm_install",
@@ -83,6 +105,23 @@ const commandPolicyViolationCodes = new Set<CommandPolicyViolation["code"]>([
   "working_directory_rejected",
   "artifact_path_rejected",
   "unsafe_custom_command_disabled",
+]);
+const gitChangeStatuses = new Set(["added", "modified", "deleted", "renamed", "unchanged"]);
+const auditEventTypes = new Set([
+  "session.created",
+  "repo.imported",
+  "job.started",
+  "job.completed",
+  "job.failed",
+  "job.cancelled",
+  "patch.applied",
+  "patch.rejected",
+  "commit.created",
+  "push.requested",
+  "push.completed",
+  "push.failed",
+  "artifact.created",
+  "artifact.deleted",
 ]);
 
 export class ProtocolValidationError extends Error {
@@ -244,9 +283,226 @@ export function assertRunnerCapabilitiesResponse(value: unknown): RunnerCapabili
     maxJobDurationMs: expectNumber(object.maxJobDurationMs, "maxJobDurationMs"),
     maxLogBytes: expectNumber(object.maxLogBytes, "maxLogBytes"),
     unsafeCustomCommandsEnabled: expectBoolean(object.unsafeCustomCommandsEnabled, "unsafeCustomCommandsEnabled"),
+    gitProvider: expectGitProviderMode(object.gitProvider, "gitProvider"),
+    gitProviderAvailable: expectBoolean(object.gitProviderAvailable, "gitProviderAvailable"),
+    gitHubAppConfigured: expectBoolean(object.gitHubAppConfigured, "gitHubAppConfigured"),
+    supportsRepoImport: expectBoolean(object.supportsRepoImport, "supportsRepoImport"),
+    supportsCommit: expectBoolean(object.supportsCommit, "supportsCommit"),
+    supportsPush: expectBoolean(object.supportsPush, "supportsPush"),
+    supportsPullRequestPlan: expectBoolean(object.supportsPullRequestPlan, "supportsPullRequestPlan"),
+    secretsInMobile: expectLiteral(object.secretsInMobile, false, "secretsInMobile"),
+    cloudRunnerProvider: expectCloudRunnerProviderMode(object.cloudRunnerProvider, "cloudRunnerProvider"),
+    cloudRunnerAvailable: expectBoolean(object.cloudRunnerAvailable, "cloudRunnerAvailable"),
+    cloudLimits: assertCloudQuotaLimits(object.cloudLimits),
+    runnerAuthMode: expectRunnerAuthMode(object.runnerAuthMode, "runnerAuthMode"),
     productionOAuthEnabled: expectLiteral(object.productionOAuthEnabled, false, "productionOAuthEnabled"),
     remoteSandboxExecution: expectBoolean(object.remoteSandboxExecution, "remoteSandboxExecution"),
     phoneSideExecution: expectLiteral(object.phoneSideExecution, false, "phoneSideExecution"),
+  };
+}
+
+export function assertGitCapabilities(value: unknown): GitCapabilities {
+  const object = expectRecord(value, "git capabilities");
+  return {
+    provider: expectGitProviderMode(object.provider, "provider"),
+    available: expectBoolean(object.available, "available"),
+    gitHubAppConfigured: expectBoolean(object.gitHubAppConfigured, "gitHubAppConfigured"),
+    supportsRepoImport: expectBoolean(object.supportsRepoImport, "supportsRepoImport"),
+    supportsCommit: expectBoolean(object.supportsCommit, "supportsCommit"),
+    supportsPush: expectBoolean(object.supportsPush, "supportsPush"),
+    supportsPullRequestPlan: expectBoolean(object.supportsPullRequestPlan, "supportsPullRequestPlan"),
+    secretsInMobile: expectLiteral(object.secretsInMobile, false, "secretsInMobile"),
+  };
+}
+
+export function assertGitRepositorySummary(value: unknown): GitRepositorySummary {
+  const object = expectRecord(value, "git repository");
+  return {
+    id: expectString(object.id, "id"),
+    owner: expectString(object.owner, "owner"),
+    name: expectString(object.name, "name"),
+    fullName: expectString(object.fullName, "fullName"),
+    defaultBranch: expectString(object.defaultBranch, "defaultBranch"),
+    private: expectBoolean(object.private, "private"),
+    htmlUrl: optionalString(object.htmlUrl, "htmlUrl"),
+  };
+}
+
+export function assertGitBranchSummary(value: unknown): GitBranchSummary {
+  const object = expectRecord(value, "git branch");
+  return {
+    name: expectString(object.name, "name"),
+    sha: expectString(object.sha, "sha"),
+    protected: optionalBoolean(object.protected, "protected"),
+  };
+}
+
+export function assertGitImportRequest(value: unknown): GitImportRequest {
+  const object = expectRecord(value, "git import request");
+  return {
+    owner: expectString(object.owner, "owner"),
+    repo: expectString(object.repo, "repo"),
+    branch: optionalString(object.branch, "branch"),
+  };
+}
+
+export function assertGitImportResult(value: unknown): GitImportResult {
+  const object = expectRecord(value, "git import result");
+  return {
+    sessionId: expectString(object.sessionId, "sessionId"),
+    repository: assertGitRepositorySummary(object.repository),
+    branch: assertGitBranchSummary(object.branch),
+    workspaceSource: assertWorkspaceSource(object.workspaceSource),
+    importedFiles: expectNumber(object.importedFiles, "importedFiles"),
+  };
+}
+
+export function assertWorkspaceSource(value: unknown): GitImportResult["workspaceSource"] {
+  const object = expectRecord(value, "workspace source");
+  const kind = expectString(object.kind, "kind");
+  if (!projectSourceKinds.has(kind as ProjectSourceKind)) {
+    throw new ProtocolValidationError(`unsupported sourceKind: ${kind}`);
+  }
+  return {
+    kind: kind as ProjectSourceKind,
+    repository: object.repository === undefined ? undefined : assertGitRepositorySummary(object.repository),
+    branch: optionalString(object.branch, "branch"),
+    commitSha: optionalString(object.commitSha, "commitSha"),
+  };
+}
+
+export function assertGitProviderError(value: unknown): GitProviderError {
+  const object = expectRecord(value, "git provider error");
+  return {
+    error: expectString(object.error, "error"),
+    code: optionalString(object.code, "code"),
+    sessionId: optionalString(object.sessionId, "sessionId"),
+    jobId: optionalString(object.jobId, "jobId"),
+    provider: optionalGitProviderMode(object.provider, "provider"),
+  };
+}
+
+export function assertGitAuthState(value: unknown): GitAuthState {
+  const object = expectRecord(value, "git auth state");
+  return {
+    provider: expectGitProviderMode(object.provider, "provider"),
+    configured: expectBoolean(object.configured, "configured"),
+    authenticated: expectBoolean(object.authenticated, "authenticated"),
+    expiresAt: optionalString(object.expiresAt, "expiresAt"),
+    secretsInMobile: expectLiteral(object.secretsInMobile, false, "secretsInMobile"),
+  };
+}
+
+export function assertGitInstallState(value: unknown): GitInstallState {
+  const object = expectRecord(value, "git install state");
+  return {
+    provider: expectGitProviderMode(object.provider, "provider"),
+    installed: expectBoolean(object.installed, "installed"),
+    installationId: optionalString(object.installationId, "installationId"),
+    ownerAllowlist: optionalStringArray(object.ownerAllowlist, "ownerAllowlist"),
+  };
+}
+
+export function assertGitChangeSummary(value: unknown): GitChangeSummary {
+  const object = expectRecord(value, "git change summary");
+  const status = expectString(object.status, "status");
+  if (!gitChangeStatuses.has(status)) {
+    throw new ProtocolValidationError(`unsupported git change status: ${status}`);
+  }
+  return {
+    path: expectString(object.path, "path"),
+    status: status as GitChangeSummary["status"],
+  };
+}
+
+export function assertGitCommitRequest(value: unknown): GitCommitRequest {
+  const object = expectRecord(value, "git commit request");
+  return {
+    message: expectString(object.message, "message"),
+    branchName: optionalString(object.branchName, "branchName"),
+  };
+}
+
+export function assertGitCommitResult(value: unknown): GitCommitResult {
+  const object = expectRecord(value, "git commit result");
+  return {
+    sessionId: expectString(object.sessionId, "sessionId"),
+    commitSha: expectString(object.commitSha, "commitSha"),
+    branchName: expectString(object.branchName, "branchName"),
+    message: expectString(object.message, "message"),
+    changedFiles: expectArray(object.changedFiles, "changedFiles").map(assertGitChangeSummary),
+  };
+}
+
+export function assertGitPushRequest(value: unknown): GitPushRequest {
+  const object = expectRecord(value, "git push request");
+  return {
+    branchName: expectString(object.branchName, "branchName"),
+    force: optionalBoolean(object.force, "force"),
+  };
+}
+
+export function assertGitPushResult(value: unknown): GitPushResult {
+  const object = expectRecord(value, "git push result");
+  return {
+    sessionId: expectString(object.sessionId, "sessionId"),
+    branchName: expectString(object.branchName, "branchName"),
+    remoteName: expectString(object.remoteName, "remoteName"),
+    pushed: expectBoolean(object.pushed, "pushed"),
+    commitSha: optionalString(object.commitSha, "commitSha"),
+    remoteUrl: optionalString(object.remoteUrl, "remoteUrl"),
+  };
+}
+
+export function assertPullRequestPlan(value: unknown): PullRequestPlan {
+  const object = expectRecord(value, "pull request plan");
+  return {
+    sessionId: expectString(object.sessionId, "sessionId"),
+    title: expectString(object.title, "title"),
+    body: expectString(object.body, "body"),
+    headBranch: expectString(object.headBranch, "headBranch"),
+    baseBranch: expectString(object.baseBranch, "baseBranch"),
+    deepLinkUrl: optionalString(object.deepLinkUrl, "deepLinkUrl"),
+    provider: expectGitProviderMode(object.provider, "provider"),
+    ready: expectBoolean(object.ready, "ready"),
+  };
+}
+
+export function assertGitAuditEvent(value: unknown): GitAuditEvent {
+  const object = expectRecord(value, "git audit event");
+  const type = expectString(object.type, "type");
+  if (!auditEventTypes.has(type)) {
+    throw new ProtocolValidationError(`unsupported audit event type: ${type}`);
+  }
+  return {
+    id: expectString(object.id, "id"),
+    type: type as GitAuditEvent["type"],
+    sessionId: optionalString(object.sessionId, "sessionId"),
+    jobId: optionalString(object.jobId, "jobId"),
+    actorId: optionalString(object.actorId, "actorId"),
+    message: expectString(object.message, "message"),
+    createdAt: expectString(object.createdAt, "createdAt"),
+    metadata: optionalStringRecord(object.metadata, "metadata"),
+  };
+}
+
+export function assertCloudQuotaLimits(value: unknown): CloudQuotaLimits {
+  const object = expectRecord(value, "cloud quota limits");
+  return {
+    maxJobsPerSession: expectNumber(object.maxJobsPerSession, "maxJobsPerSession"),
+    maxConcurrentJobs: expectNumber(object.maxConcurrentJobs, "maxConcurrentJobs"),
+    maxDurationMs: expectNumber(object.maxDurationMs, "maxDurationMs"),
+    maxWorkspaceBytes: expectNumber(object.maxWorkspaceBytes, "maxWorkspaceBytes"),
+    maxArtifactBytes: expectNumber(object.maxArtifactBytes, "maxArtifactBytes"),
+  };
+}
+
+export function assertCloudRunnerCapabilities(value: unknown): CloudRunnerCapabilities {
+  const object = expectRecord(value, "cloud runner capabilities");
+  return {
+    provider: expectCloudRunnerProviderMode(object.provider, "provider"),
+    available: expectBoolean(object.available, "available"),
+    limits: assertCloudQuotaLimits(object.limits),
   };
 }
 
@@ -529,6 +785,30 @@ function expectAppServerTransport(value: unknown, label: string): AppServerTrans
   return transport as AppServerTransport;
 }
 
+function expectGitProviderMode(value: unknown, label: string): GitProviderMode {
+  const provider = expectString(value, label);
+  if (!gitProviderModes.has(provider as GitProviderMode)) {
+    throw new ProtocolValidationError(`unsupported git provider: ${provider}`);
+  }
+  return provider as GitProviderMode;
+}
+
+function expectCloudRunnerProviderMode(value: unknown, label: string): RunnerCapabilitiesResponse["cloudRunnerProvider"] {
+  const provider = expectString(value, label);
+  if (!cloudRunnerProviderModes.has(provider)) {
+    throw new ProtocolValidationError(`unsupported cloud runner provider: ${provider}`);
+  }
+  return provider as RunnerCapabilitiesResponse["cloudRunnerProvider"];
+}
+
+function expectRunnerAuthMode(value: unknown, label: string): RunnerAuthMode {
+  const mode = expectString(value, label);
+  if (!runnerAuthModes.has(mode as RunnerAuthMode)) {
+    throw new ProtocolValidationError(`unsupported runner auth mode: ${mode}`);
+  }
+  return mode as RunnerAuthMode;
+}
+
 function expectSandboxBackend(value: unknown, label: string): SandboxBackend {
   const backend = expectString(value, label);
   if (!sandboxBackends.has(backend as SandboxBackend)) {
@@ -596,6 +876,13 @@ function optionalPatchSource(value: unknown, label: string): PatchSource | undef
   return source as PatchSource;
 }
 
+function optionalGitProviderMode(value: unknown, label: string): GitProviderMode | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return expectGitProviderMode(value, label);
+}
+
 function optionalPatchLifecycleStatus(value: unknown, label: string): PatchLifecycleStatus | undefined {
   if (value === undefined || value === null) {
     return undefined;
@@ -660,6 +947,13 @@ function optionalNumber(value: unknown, label: string): number | undefined {
     return undefined;
   }
   return expectNumber(value, label);
+}
+
+function optionalBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return expectBoolean(value, label);
 }
 
 function optionalStringRecord(value: unknown, label: string): Record<string, string> | undefined {

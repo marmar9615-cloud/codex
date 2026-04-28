@@ -49,6 +49,18 @@ test("schemas expose the MVP runner contract", () => {
     "maxJobDurationMs",
     "maxLogBytes",
     "unsafeCustomCommandsEnabled",
+    "gitProvider",
+    "gitProviderAvailable",
+    "gitHubAppConfigured",
+    "supportsRepoImport",
+    "supportsCommit",
+    "supportsPush",
+    "supportsPullRequestPlan",
+    "secretsInMobile",
+    "cloudRunnerProvider",
+    "cloudRunnerAvailable",
+    "cloudLimits",
+    "runnerAuthMode",
     "productionOAuthEnabled",
     "remoteSandboxExecution",
     "phoneSideExecution",
@@ -74,4 +86,18 @@ test("schemas expose the MVP runner contract", () => {
   assert.deepEqual(mobileProtocolSchemas.commandPolicyViolation.required, ["code", "message"]);
   assert.deepEqual(mobileProtocolSchemas.runnerError.required, ["error"]);
   assert.deepEqual(mobileProtocolSchemas.receivePatchRequest.required, ["unifiedDiff"]);
+  assert.deepEqual(mobileProtocolSchemas.gitCapabilities.required, [
+    "provider",
+    "available",
+    "gitHubAppConfigured",
+    "supportsRepoImport",
+    "supportsCommit",
+    "supportsPush",
+    "supportsPullRequestPlan",
+    "secretsInMobile",
+  ]);
+  assert.deepEqual(mobileProtocolSchemas.gitImportRequest.required, ["owner", "repo"]);
+  assert.deepEqual(mobileProtocolSchemas.gitCommitRequest.required, ["message"]);
+  assert.deepEqual(mobileProtocolSchemas.gitPushRequest.required, ["branchName"]);
+  assert.deepEqual(mobileProtocolSchemas.cloudRunnerCapabilities.required, ["provider", "available", "limits"]);
 });

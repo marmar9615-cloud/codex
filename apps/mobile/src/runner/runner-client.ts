@@ -1,22 +1,41 @@
 import {
-  assertRunnerEvent,
-  assertRunnerJob,
+  assertBuildArtifact,
+  assertGitBranchSummary,
+  assertGitCapabilities,
+  assertGitChangeSummary,
+  assertGitCommitResult,
+  assertGitImportResult,
+  assertGitPushResult,
+  assertGitRepositorySummary,
   assertMobileSession,
   assertPatchProposal,
-  assertBuildArtifact,
+  assertPullRequestPlan,
   assertRunnerCapabilitiesResponse,
   assertRunnerError,
+  assertRunnerEvent,
+  assertRunnerJob,
 } from "@codex/mobile-protocol";
 import type {
   ArtifactListResponse,
-  BuildJobRequest,
   BuildArtifact,
+  BuildJobRequest,
   CreateSessionRequest,
   CreateSessionResponse,
+  GitBranchSummary,
+  GitCapabilities,
+  GitChangeSummary,
+  GitCommitRequest,
+  GitCommitResult,
+  GitImportRequest,
+  GitImportResult,
+  GitPushRequest,
+  GitPushResult,
+  GitRepositorySummary,
   GetJobResponse,
   GetPatchResponse,
   GetSessionResponse,
   PatchProposal,
+  PullRequestPlan,
   RunnerCapabilitiesResponse,
   RunnerEvent,
   RunnerJob,
@@ -44,6 +63,22 @@ export class MobileRunnerClient {
 
   async getCapabilities(): Promise<RunnerCapabilitiesResponse> {
     return assertRunnerCapabilitiesResponse(await this.get<RunnerCapabilitiesResponse>("/capabilities"));
+  }
+
+  async getGitCapabilities(): Promise<GitCapabilities> {
+    return assertGitCapabilities(await this.get<GitCapabilities>("/git/capabilities"));
+  }
+
+  async listGitRepositories(): Promise<GitRepositorySummary[]> {
+    const response = await this.get<{ repositories: GitRepositorySummary[] }>("/git/repositories");
+    return response.repositories.map((repository) => assertGitRepositorySummary(repository));
+  }
+
+  async listGitBranches(owner: string, repo: string): Promise<GitBranchSummary[]> {
+    const response = await this.get<{ branches: GitBranchSummary[] }>(
+      `/git/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+    );
+    return response.branches.map((branch) => assertGitBranchSummary(branch));
   }
 
   async createSession(request: CreateSessionRequest): Promise<CreateSessionResponse> {
@@ -87,6 +122,32 @@ export class MobileRunnerClient {
     return {
       artifacts: response.artifacts.map((artifact) => assertBuildArtifact(artifact)),
     };
+  }
+
+  async importGitHubRepository(sessionId: string, request: GitImportRequest): Promise<GitImportResult> {
+    return assertGitImportResult(await this.post<GitImportResult>(`/sessions/${sessionId}/import/github`, request));
+  }
+
+  async createGitBranch(sessionId: string, branchName: string): Promise<GitBranchSummary> {
+    const response = await this.post<{ branch: GitBranchSummary }>(`/sessions/${sessionId}/git/branch`, { branchName });
+    return assertGitBranchSummary(response.branch);
+  }
+
+  async getGitStatus(sessionId: string): Promise<GitChangeSummary[]> {
+    const response = await this.get<{ changes: GitChangeSummary[] }>(`/sessions/${sessionId}/git/status`);
+    return response.changes.map((change) => assertGitChangeSummary(change));
+  }
+
+  async commitGitChanges(sessionId: string, request: GitCommitRequest): Promise<GitCommitResult> {
+    return assertGitCommitResult(await this.post<GitCommitResult>(`/sessions/${sessionId}/git/commit`, request));
+  }
+
+  async pushGitBranch(sessionId: string, request: GitPushRequest): Promise<GitPushResult> {
+    return assertGitPushResult(await this.post<GitPushResult>(`/sessions/${sessionId}/git/push`, request));
+  }
+
+  async createPullRequestPlan(sessionId: string): Promise<PullRequestPlan> {
+    return assertPullRequestPlan(await this.post<PullRequestPlan>(`/sessions/${sessionId}/git/pr-plan`, {}));
   }
 
   async streamJobLogs(

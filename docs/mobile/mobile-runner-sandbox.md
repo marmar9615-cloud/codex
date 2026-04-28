@@ -117,6 +117,6 @@ EAS builds Codex Mobile itself for TestFlight and Google Play. The sandbox backe
 ## Still Gated
 
 - Production ChatGPT/Codex mobile auth remains gated.
-- Production cloud sandbox infrastructure is not complete.
-- GitHub clone/push is not complete.
+- Production cloud sandbox infrastructure is not complete; Milestone 6 only adds provider-neutral control-plane interfaces, quotas, audit logs, artifact-store policy, cleanup policy, and dev auth scaffolding.
+- GitHub clone/push against the real GitHub API is not complete; fake Git provider flow is implemented for import, branch, commit, push, and PR-plan UI/API testing.
 - Android SAF directory persistence and iOS security-scoped bookmarks remain future native work.

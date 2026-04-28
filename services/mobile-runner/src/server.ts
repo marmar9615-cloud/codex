@@ -3,6 +3,11 @@ import {
   assertBuildJobRequest,
   assertBuildJobResult,
   assertCreateSessionRequest,
+  assertGitCommitRequest,
+  assertGitImportRequest,
+  assertGitPushRequest,
+  assertGitRepositorySummary,
+  assertGitCapabilities,
   assertPatchProposal,
   assertReceivePatchRequest,
   assertRunnerCapabilitiesResponse,
@@ -18,11 +23,19 @@ import type {
   BuildJobResult,
   BuildArtifact,
   CreateSessionResponse,
+  GitBranchSummary,
+  GitCapabilities,
+  GitChangeSummary,
+  GitCommitResult,
+  GitImportResult,
+  GitPushResult,
+  GitRepositorySummary,
   GetJobResponse,
   GetPatchResponse,
   GetSessionResponse,
   MobileSession,
   PatchProposal,
+  PullRequestPlan,
   ProjectSnapshot,
   ReceivePatchResponse,
   RunnerCapabilitiesResponse,
@@ -43,17 +56,35 @@ import { CodexAppServerBridgeError } from "./codex/AppServerProcessManager.js";
 import {
   capabilitiesFromConfig,
   getCodexBridgePreflightError,
+  getCloudRunnerPreflightError,
+  getGitProviderPreflightError,
   getSandboxPreflightError,
   loadMobileRunnerConfig,
 } from "./config.js";
 import type { MobileRunnerConfig } from "./config.js";
 import { sanitizeForRunnerLog } from "./codex/jsonRpc.js";
+import { DevAuthProvider } from "./auth/DevAuthProvider.js";
+import { createAuthPolicy, RunnerAuthPolicyError } from "./auth/AuthPolicy.js";
+import { InMemoryArtifactStore } from "./cloud/ArtifactStore.js";
+import { InMemoryAuditLogStore } from "./cloud/AuditLogStore.js";
+import { CloudJobDispatcher } from "./cloud/CloudJobDispatcher.js";
+import { FakeCloudRunnerProvider } from "./cloud/FakeCloudRunnerProvider.js";
+import { QuotaPolicyError } from "./cloud/QuotaPolicy.js";
+import { FakeGitProvider } from "./git/FakeGitProvider.js";
+import { GitProviderError } from "./git/GitProvider.js";
+import { GitSecurityPolicyError, assertFeatureBranch } from "./git/GitSecurityPolicy.js";
+import { GitHubAppProvider } from "./git/GitHubAppProvider.js";
+import { materializeGitSnapshot } from "./git/GitWorkspaceManager.js";
+import { LocalGitCliProvider } from "./git/LocalGitCliProvider.js";
 import { FakeSandboxBackend } from "./sandbox/FakeSandboxBackend.js";
 import { LocalDockerSandboxBackend } from "./sandbox/LocalDockerSandboxBackend.js";
 import { resolveSandboxCommand } from "./sandbox/SandboxCommandPolicy.js";
 import { SandboxBackendError } from "./sandbox/SandboxBackend.js";
 import type { ResolvedSandboxCommand } from "./sandbox/SandboxCommandPolicy.js";
 import type { SandboxBackend, SandboxCommandSpec } from "./sandbox/SandboxBackend.js";
+import type { CloudRunnerProvider } from "./cloud/CloudRunnerProvider.js";
+import type { GitProvider } from "./git/GitProvider.js";
+import type { RunnerAuthProvider } from "./auth/RunnerAuth.js";
 
 type ServerState = {
   sessions: Map<string, MobileSession>;
@@ -65,6 +96,12 @@ type ServerState = {
   jobPrompts: Map<string, string>;
   sandboxBuildRequests: Map<string, ResolvedSandboxCommand>;
   sandboxBuildResults: Map<string, BuildJobResult>;
+  gitProvider: GitProvider;
+  cloudProvider: CloudRunnerProvider;
+  cloudDispatcher: CloudJobDispatcher;
+  auditLog: InMemoryAuditLogStore;
+  artifactStore: InMemoryArtifactStore;
+  authProvider: RunnerAuthProvider;
   config: MobileRunnerConfig;
   nextSession: number;
   nextJob: number;
@@ -85,6 +122,7 @@ export type StartMobileRunnerOptions = MobileRunnerServerOptions & {
 export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}): http.Server {
   const now = options.now ?? (() => new Date().toISOString());
   const config = options.config ?? loadMobileRunnerConfig();
+  const cloudProvider = createCloudRunnerProvider(config);
   const state: ServerState = {
     sessions: new Map(),
     snapshots: new Map(),
@@ -95,6 +133,12 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
     jobPrompts: new Map(),
     sandboxBuildRequests: new Map(),
     sandboxBuildResults: new Map(),
+    gitProvider: createGitProvider(config),
+    cloudProvider,
+    cloudDispatcher: new CloudJobDispatcher(cloudProvider, config.cloudLimits),
+    auditLog: new InMemoryAuditLogStore(),
+    artifactStore: new InMemoryArtifactStore(),
+    authProvider: new DevAuthProvider(),
     config,
     nextSession: 1,
     nextJob: 1,
@@ -106,9 +150,9 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
     try {
       await routeRequest(request, response, state, now);
     } catch (error) {
-      const status = error instanceof HttpError ? error.status : error instanceof SandboxBackendError ? error.status : 500;
-      const code = error instanceof HttpError ? error.code : error instanceof SandboxBackendError ? error.code : "runner_error";
-      const message = error instanceof Error ? error.message : "unknown runner error";
+      const status = errorStatus(error);
+      const code = errorCode(error);
+      const message = error instanceof Error ? sanitizeForRunnerLog(error.message) : "unknown runner error";
       writeJson<RunnerError>(response, status, {
         error: message,
         code,
@@ -139,6 +183,8 @@ async function routeRequest(
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const path = normalizeApiPath(url.pathname);
+  const authPolicy = createAuthPolicy(state.config.runnerAuthMode);
+  const identity = authPolicy.authenticate(state.authProvider, request.headers);
 
   if (request.method === "GET" && path === "/healthz") {
     writeJson(response, 200, { ok: true });
@@ -146,7 +192,27 @@ async function routeRequest(
   }
 
   if (request.method === "GET" && path === "/capabilities") {
-    writeJson<RunnerCapabilitiesResponse>(response, 200, assertRunnerCapabilitiesResponse(capabilitiesFromConfig(state.config)));
+    writeJson<RunnerCapabilitiesResponse>(response, 200, capabilitiesForState(state));
+    return;
+  }
+
+  if (request.method === "GET" && path === "/git/capabilities") {
+    writeJson<GitCapabilities>(response, 200, assertGitCapabilities(state.gitProvider.capabilities()));
+    return;
+  }
+
+  if (request.method === "GET" && path === "/git/repositories") {
+    writeJson<{ repositories: GitRepositorySummary[] }>(response, 200, {
+      repositories: (await state.gitProvider.listRepositories()).map(assertGitRepositorySummary),
+    });
+    return;
+  }
+
+  const branchesMatch = /^\/git\/repositories\/([^/]+)\/([^/]+)\/branches$/.exec(path);
+  if (request.method === "GET" && branchesMatch) {
+    writeJson<{ branches: GitBranchSummary[] }>(response, 200, {
+      branches: await state.gitProvider.listBranches(decodeURIComponent(branchesMatch[1] ?? ""), decodeURIComponent(branchesMatch[2] ?? "")),
+    });
     return;
   }
 
@@ -164,6 +230,15 @@ async function routeRequest(
       snapshotVersion: 0,
     };
     state.sessions.set(session.id, session);
+    state.auditLog.record(
+      {
+        type: "session.created",
+        sessionId: session.id,
+        actorId: identity.actorId,
+        message: `Created mobile runner session for ${params.projectName}`,
+      },
+      now,
+    );
     writeJson<CreateSessionResponse>(response, 201, { session });
     return;
   }
@@ -172,6 +247,139 @@ async function routeRequest(
   if (request.method === "GET" && sessionMatch) {
     const session = requireSession(state, sessionMatch[1] ?? "");
     writeJson<GetSessionResponse>(response, 200, { session });
+    return;
+  }
+
+  const gitImportMatch = /^\/sessions\/([^/]+)\/import\/github$/.exec(path);
+  if (request.method === "POST" && gitImportMatch) {
+    const session = requireSession(state, gitImportMatch[1] ?? "");
+    const params = assertGitImportRequest(await readJson(request));
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    const result = await state.gitProvider.importRepository({ sessionId: session.id, workspaceRoot }, params);
+    validateSnapshotPaths(result.snapshot, state.config.resourceLimits.maxWorkspaceBytes);
+    await materializeGitSnapshot(workspaceRoot, result.snapshot);
+    state.snapshots.set(session.id, result.snapshot);
+    const updated: MobileSession = {
+      ...session,
+      sourceKind: "github",
+      status: "ready",
+      updatedAt: now(),
+      snapshotVersion: (session.snapshotVersion ?? 0) + 1,
+    };
+    state.sessions.set(session.id, updated);
+    state.auditLog.record(
+      {
+        type: "repo.imported",
+        sessionId: session.id,
+        actorId: identity.actorId,
+        message: `Imported ${result.repository.fullName} into runner workspace`,
+        metadata: { provider: state.gitProvider.mode, branch: result.branch.name },
+      },
+      now,
+    );
+    const publicResult: GitImportResult = {
+      sessionId: result.sessionId,
+      repository: result.repository,
+      branch: result.branch,
+      workspaceSource: result.workspaceSource,
+      importedFiles: result.importedFiles,
+    };
+    writeJson<GitImportResult>(response, 201, publicResult);
+    return;
+  }
+
+  const gitBranchMatch = /^\/sessions\/([^/]+)\/git\/branch$/.exec(path);
+  if (request.method === "POST" && gitBranchMatch) {
+    const session = requireSession(state, gitBranchMatch[1] ?? "");
+    const body = expectRequestRecord(await readJson(request));
+    const branchName = assertFeatureBranch(expectRequestString(body.branchName, "branchName"));
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    writeJson<{ branch: GitBranchSummary }>(response, 201, {
+      branch: await state.gitProvider.createBranch({ sessionId: session.id, workspaceRoot }, branchName),
+    });
+    return;
+  }
+
+  const gitStatusMatch = /^\/sessions\/([^/]+)\/git\/status$/.exec(path);
+  if (request.method === "GET" && gitStatusMatch) {
+    const session = requireSession(state, gitStatusMatch[1] ?? "");
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    writeJson<{ changes: GitChangeSummary[] }>(response, 200, {
+      changes: await state.gitProvider.status({ sessionId: session.id, workspaceRoot }, state.snapshots.get(session.id)?.files.map((file) => file.path) ?? []),
+    });
+    return;
+  }
+
+  const gitCommitMatch = /^\/sessions\/([^/]+)\/git\/commit$/.exec(path);
+  if (request.method === "POST" && gitCommitMatch) {
+    const session = requireSession(state, gitCommitMatch[1] ?? "");
+    const params = assertGitCommitRequest(await readJson(request));
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    const changes = await state.gitProvider.status({ sessionId: session.id, workspaceRoot }, state.snapshots.get(session.id)?.files.map((file) => file.path) ?? []);
+    const result = await state.gitProvider.commit({ sessionId: session.id, workspaceRoot }, params, changes);
+    state.auditLog.record(
+      {
+        type: "commit.created",
+        sessionId: session.id,
+        actorId: identity.actorId,
+        message: `Created commit on ${result.branchName}`,
+        metadata: { provider: state.gitProvider.mode, commitSha: result.commitSha },
+      },
+      now,
+    );
+    writeJson<GitCommitResult>(response, 201, result);
+    return;
+  }
+
+  const gitPushMatch = /^\/sessions\/([^/]+)\/git\/push$/.exec(path);
+  if (request.method === "POST" && gitPushMatch) {
+    const session = requireSession(state, gitPushMatch[1] ?? "");
+    const params = assertGitPushRequest(await readJson(request));
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    state.auditLog.record(
+      {
+        type: "push.requested",
+        sessionId: session.id,
+        actorId: identity.actorId,
+        message: `Push requested for ${params.branchName}`,
+        metadata: { provider: state.gitProvider.mode },
+      },
+      now,
+    );
+    try {
+      const result = await state.gitProvider.push({ sessionId: session.id, workspaceRoot }, params);
+      state.auditLog.record(
+        {
+          type: "push.completed",
+          sessionId: session.id,
+          actorId: identity.actorId,
+          message: `Pushed branch ${result.branchName}`,
+          metadata: { provider: state.gitProvider.mode },
+        },
+        now,
+      );
+      writeJson<GitPushResult>(response, 201, result);
+      return;
+    } catch (caught) {
+      state.auditLog.record(
+        {
+          type: "push.failed",
+          sessionId: session.id,
+          actorId: identity.actorId,
+          message: caught instanceof Error ? sanitizeForRunnerLog(caught.message) : "Push failed",
+          metadata: { provider: state.gitProvider.mode },
+        },
+        now,
+      );
+      throw caught;
+    }
+  }
+
+  const gitPrPlanMatch = /^\/sessions\/([^/]+)\/git\/pr-plan$/.exec(path);
+  if (request.method === "POST" && gitPrPlanMatch) {
+    const session = requireSession(state, gitPrPlanMatch[1] ?? "");
+    const workspaceRoot = await ensureSessionWorkspace(state, session.id);
+    writeJson<PullRequestPlan>(response, 200, await state.gitProvider.pullRequestPlan({ sessionId: session.id, workspaceRoot }));
     return;
   }
 
@@ -623,6 +831,54 @@ function createSandboxBackend(config: MobileRunnerConfig): SandboxBackend {
   return new FakeSandboxBackend();
 }
 
+function createGitProvider(config: MobileRunnerConfig): GitProvider {
+  if (config.gitProvider === "github-app") {
+    return new GitHubAppProvider(config.gitHubAppConfigured);
+  }
+  if (config.gitProvider === "local-git") {
+    return new LocalGitCliProvider(getGitProviderPreflightError(config) === null);
+  }
+  return new FakeGitProvider();
+}
+
+function createCloudRunnerProvider(config: MobileRunnerConfig): CloudRunnerProvider {
+  if (config.cloudRunnerProvider === "fake") {
+    return new FakeCloudRunnerProvider(config.cloudLimits);
+  }
+  return {
+    mode: config.cloudRunnerProvider,
+    capabilities: () => ({
+      provider: config.cloudRunnerProvider,
+      available: false,
+      limits: config.cloudLimits,
+    }),
+    dispatch: async () => {
+      throw new HttpError(503, "cloud_runner_unavailable", getCloudRunnerPreflightError(config) ?? "cloud runner provider unavailable");
+    },
+    cancel: async () => {},
+  };
+}
+
+function capabilitiesForState(state: ServerState): RunnerCapabilitiesResponse {
+  const base = capabilitiesFromConfig(state.config);
+  const git = state.gitProvider.capabilities();
+  const cloud = state.cloudProvider.capabilities();
+  return assertRunnerCapabilitiesResponse({
+    ...base,
+    gitProvider: git.provider,
+    gitProviderAvailable: git.available,
+    gitHubAppConfigured: git.gitHubAppConfigured,
+    supportsRepoImport: git.supportsRepoImport,
+    supportsCommit: git.supportsCommit,
+    supportsPush: git.supportsPush,
+    supportsPullRequestPlan: git.supportsPullRequestPlan,
+    secretsInMobile: false,
+    cloudRunnerProvider: cloud.provider,
+    cloudRunnerAvailable: cloud.available,
+    cloudLimits: cloud.limits,
+  });
+}
+
 function createCodexAppServerPatch(
   state: ServerState,
   sessionId: string,
@@ -718,7 +974,18 @@ function createArtifactFromRequest(
 }
 
 function appendArtifact(state: ServerState, sessionId: string, artifact: BuildArtifact): void {
+  state.artifactStore.put(artifact, state.config.resourceLimits.maxArtifactBytes);
   state.artifacts.set(sessionId, [...(state.artifacts.get(sessionId) ?? []), artifact]);
+  state.auditLog.record(
+    {
+      type: "artifact.created",
+      sessionId,
+      jobId: artifact.jobId,
+      message: `Stored artifact ${artifact.title}`,
+      metadata: { kind: artifact.kind },
+    },
+    () => artifact.createdAt,
+  );
 }
 
 function validateSnapshotPaths(snapshot: ProjectSnapshot, maxWorkspaceBytes: number): void {
@@ -825,6 +1092,43 @@ async function readJson(request: http.IncomingMessage): Promise<unknown> {
 function writeJson<T>(response: http.ServerResponse, status: number, body: T): void {
   response.writeHead(status, { "Content-Type": "application/json" });
   response.end(JSON.stringify(body));
+}
+
+function errorStatus(error: unknown): number {
+  if (error instanceof HttpError) {
+    return error.status;
+  }
+  if (error instanceof SandboxBackendError) {
+    return error.status;
+  }
+  if (error instanceof GitProviderError || error instanceof GitSecurityPolicyError || error instanceof RunnerAuthPolicyError) {
+    return error.status;
+  }
+  if (error instanceof QuotaPolicyError) {
+    return 429;
+  }
+  return 500;
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof HttpError || error instanceof SandboxBackendError || error instanceof GitProviderError || error instanceof GitSecurityPolicyError || error instanceof RunnerAuthPolicyError || error instanceof QuotaPolicyError) {
+    return error.code;
+  }
+  return "runner_error";
+}
+
+function expectRequestRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError(400, "invalid_request", "request body must be an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function expectRequestString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new HttpError(400, "invalid_request", `${field} must be a non-empty string`);
+  }
+  return value;
 }
 
 function normalizeApiPath(path: string): string {

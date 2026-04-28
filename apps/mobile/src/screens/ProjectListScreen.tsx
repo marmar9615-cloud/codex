@@ -39,6 +39,9 @@ export function ProjectListScreen() {
           <Link href="/build" asChild>
             <ActionButton>Runner</ActionButton>
           </Link>
+          <Link href="/git" asChild>
+            <ActionButton>Git</ActionButton>
+          </Link>
         </View>
 
         <View style={{ flexDirection: "row", gap: spacing.sm, flexWrap: "wrap" }}>
@@ -77,6 +80,11 @@ export function ProjectListScreen() {
               <Text selectable style={{ color: colors.muted, fontSize: 13 }}>
                 {project.workspaceUri}
               </Text>
+              {project.branchName || project.dirty !== undefined ? (
+                <Text selectable style={{ color: colors.muted, fontSize: 13 }}>
+                  Branch: {project.branchName ?? project.workspaceSource?.branch ?? "none"}  Status: {project.dirty ? "dirty" : "clean"}
+                </Text>
+              ) : null}
             </Pressable>
           ))}
         </View>

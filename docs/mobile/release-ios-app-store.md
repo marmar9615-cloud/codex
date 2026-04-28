@@ -55,6 +55,8 @@ Status: planning and configuration prep only. Do not upload, submit, or modify r
 - Do not scrape ChatGPT, collect user passwords, use browser cookies, or call private endpoints.
 - Do not describe the app as an on-device shell for arbitrary project commands or a broad iPhone filesystem editor.
 - Do not claim iOS builds run locally on the iPhone. Native iOS builds must go through EAS, CI, or a Mac/Xcode runner.
+- Do not claim production GitHub App import/push or production cloud sandboxing until those server-side systems are implemented and tested.
+- Do not include GitHub App private keys, installation tokens, service-account JSON, or cloud credentials in the mobile app or Expo public config.
 - Do not submit for App Review without an explicit human confirmation.
 
 ## Review Notes Draft
@@ -62,6 +64,8 @@ Status: planning and configuration prep only. Do not upload, submit, or modify r
 Codex Mobile is a mobile coding-agent IDE. Users edit project files inside the app workspace or import files they choose through supported document flows. Agent patches are shown for review, and users approve or reject changes before they are applied. Heavy build and test commands run in runner-side sandbox environments; the app does not execute arbitrary downloaded code locally on iPhone. ChatGPT/Codex sign-in is either implemented through an officially supported public mobile auth flow or disabled behind a feature flag.
 
 Important distinction: EAS Build creates Codex Mobile's own iOS app binary for TestFlight/App Store distribution. The mobile runner sandbox runs users' project build/test commands outside the phone. These are separate systems.
+
+GitHub workflows are branch-first and server-mediated. The iOS app does not store GitHub installation tokens, private keys, passwords, personal access tokens, service-account JSON, or cloud runner credentials.
 
 ## EAS Build And TestFlight Commands
 

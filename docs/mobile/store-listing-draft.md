@@ -16,6 +16,8 @@ Codex Mobile brings a coding-agent workflow to iPhone and Android while respecti
 
 Heavy commands such as package installs, compilers, test suites, Gradle, and Xcode-related workflows run in a remote sandbox runner. The app does not provide an on-device shell for arbitrary project commands and does not claim broad phone filesystem access.
 
+GitHub-style workflows use server-side provider integration. The app prepares branch-first commit, push, and PR-plan flows and does not store GitHub App private keys, installation tokens, passwords, or personal access tokens on device.
+
 Production ChatGPT/Codex account sign-in is enabled only when an officially supported public mobile auth flow is available. Dev API-key mode is for local testing only.
 
 ## Suggested Keywords / Tags
@@ -35,6 +37,7 @@ Production ChatGPT/Codex account sign-in is enabled only when an officially supp
 - Agent chat streaming runner logs.
 - Diff review with accept/reject controls.
 - Build runner artifacts screen.
+- Git publish screen showing branch-first commit/push/PR plan.
 - Settings/Auth screen showing gated production sign-in.
 
 ## What Codex Can Automate
@@ -65,3 +68,5 @@ Production ChatGPT/Codex account sign-in is enabled only when an officially supp
 - Do not claim an on-device iPhone shell for arbitrary project commands.
 - Do not claim on-device iOS build/install workflows.
 - Do not claim production ChatGPT/Codex auth unless officially supported.
+- Do not claim production GitHub App integration until it is implemented and tested server-side.
+- Do not claim production cloud runner infrastructure until a real provider is deployed and tested.

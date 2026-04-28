@@ -263,6 +263,31 @@ The mobile `BuildRunnerScreen` can start safe build/test actions such as install
 
 EAS builds Codex Mobile itself for TestFlight and Google Play. The sandbox backend runs users' project build/test commands in runner environments. They are separate systems.
 
+Milestone 6 adds GitHub-style workspace lifecycle foundations and a cloud runner control-plane skeleton.
+
+Git provider modes:
+
+```bash
+GIT_PROVIDER=fake
+GIT_PROVIDER=local-git
+GIT_PROVIDER=github-app
+```
+
+`fake` remains the default and supports import, feature-branch creation, status, commit, push, and PR-plan metadata without network or credentials. `github-app` is server-side only and remains gated until the GitHub App install/token flow is implemented. The mobile app never receives GitHub App private keys, installation tokens, service-account credentials, or personal access tokens.
+
+Cloud runner provider modes:
+
+```bash
+CLOUD_RUNNER_PROVIDER=fake
+CLOUD_RUNNER_PROVIDER=none
+CLOUD_RUNNER_PROVIDER=aws-fargate
+CLOUD_RUNNER_PROVIDER=gcp-cloud-run-jobs
+CLOUD_RUNNER_PROVIDER=fly-machines
+CLOUD_RUNNER_PROVIDER=kubernetes
+```
+
+Only `fake` is implemented. The control plane now has provider interfaces, in-memory job records, quota policy, audit log store, artifact store, cleanup policy, and dev auth scaffolding. Production cloud sandbox execution still requires a real provider adapter, durable persistence, object storage, production API auth, monitoring, cleanup workers, and abuse controls.
+
 ## Next Milestone
 
-The next real build step is production cloud sandbox infrastructure. It should replace the local Docker development adapter with isolated multi-user runner environments, authenticated job dispatch, durable artifact storage, quotas, audit logs, and cleanup, while keeping phone-side execution limited to safe app-contained editing, preview, and user-approved patch application.
+The next real build step is implementing one production-grade server-side integration lane: either the GitHub App install/clone/commit/push flow or a real cloud sandbox provider adapter with durable job/artifact persistence. Both should stay server-side, keep secrets out of mobile, and preserve branch-first user approval.

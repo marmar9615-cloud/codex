@@ -75,6 +75,24 @@ test("runner client validates capabilities response", async () => {
           maxJobDurationMs: 120000,
           maxLogBytes: 1048576,
           unsafeCustomCommandsEnabled: false,
+          gitProvider: "fake",
+          gitProviderAvailable: true,
+          gitHubAppConfigured: false,
+          supportsRepoImport: true,
+          supportsCommit: true,
+          supportsPush: true,
+          supportsPullRequestPlan: true,
+          secretsInMobile: false,
+          cloudRunnerProvider: "fake",
+          cloudRunnerAvailable: true,
+          cloudLimits: {
+            maxJobsPerSession: 20,
+            maxConcurrentJobs: 2,
+            maxDurationMs: 120000,
+            maxWorkspaceBytes: 52428800,
+            maxArtifactBytes: 10485760,
+          },
+          runnerAuthMode: "dev",
           productionOAuthEnabled: false,
           remoteSandboxExecution: false,
           phoneSideExecution: false,
@@ -90,6 +108,123 @@ test("runner client validates capabilities response", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("runner client validates Git provider lifecycle responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  try {
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      if (url.endsWith("/git/capabilities")) {
+        return jsonResponse({
+          provider: "fake",
+          available: true,
+          gitHubAppConfigured: false,
+          supportsRepoImport: true,
+          supportsCommit: true,
+          supportsPush: true,
+          supportsPullRequestPlan: true,
+          secretsInMobile: false,
+        });
+      }
+      if (url.endsWith("/git/repositories")) {
+        return jsonResponse({
+          repositories: [
+            {
+              id: "fake-repo",
+              owner: "openai",
+              name: "codex-mobile-sample",
+              fullName: "openai/codex-mobile-sample",
+              defaultBranch: "main",
+              private: false,
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/branches")) {
+        return jsonResponse({ branches: [{ name: "main", sha: "abc", protected: true }] });
+      }
+      if (url.endsWith("/import/github")) {
+        return jsonResponse(
+          {
+            sessionId: "mrs_0001",
+            repository: {
+              id: "fake-repo",
+              owner: "openai",
+              name: "codex-mobile-sample",
+              fullName: "openai/codex-mobile-sample",
+              defaultBranch: "main",
+              private: false,
+            },
+            branch: { name: "main", sha: "abc", protected: true },
+            workspaceSource: { kind: "github", branch: "main" },
+            importedFiles: 3,
+          },
+          201,
+        );
+      }
+      if (url.endsWith("/git/branch")) {
+        return jsonResponse({ branch: { name: "codex/mobile-test", sha: "abc", protected: false } }, 201);
+      }
+      if (url.endsWith("/git/status")) {
+        return jsonResponse({ changes: [{ path: "src/App.tsx", status: "modified" }] });
+      }
+      if (url.endsWith("/git/commit")) {
+        return jsonResponse(
+          {
+            sessionId: "mrs_0001",
+            commitSha: "fakecommit0001",
+            branchName: "codex/mobile-test",
+            message: "Apply patch",
+            changedFiles: [{ path: "src/App.tsx", status: "modified" }],
+          },
+          201,
+        );
+      }
+      if (url.endsWith("/git/push")) {
+        return jsonResponse(
+          {
+            sessionId: "mrs_0001",
+            branchName: "codex/mobile-test",
+            remoteName: "origin",
+            pushed: true,
+          },
+          201,
+        );
+      }
+      if (url.endsWith("/git/pr-plan")) {
+        return jsonResponse({
+          sessionId: "mrs_0001",
+          title: "PR",
+          body: "Plan",
+          headBranch: "codex/mobile-test",
+          baseBranch: "main",
+          provider: "fake",
+          ready: true,
+        });
+      }
+      return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    };
+    const client = new MobileRunnerClient("http://runner.invalid");
+    assert.equal((await client.getGitCapabilities()).provider, "fake");
+    assert.equal((await client.listGitRepositories())[0]?.fullName, "openai/codex-mobile-sample");
+    assert.equal((await client.listGitBranches("openai", "codex-mobile-sample"))[0]?.name, "main");
+    assert.equal((await client.importGitHubRepository("mrs_0001", { owner: "openai", repo: "codex-mobile-sample" })).importedFiles, 3);
+    assert.equal((await client.createGitBranch("mrs_0001", "codex/mobile-test")).name, "codex/mobile-test");
+    assert.equal((await client.getGitStatus("mrs_0001"))[0]?.path, "src/App.tsx");
+    assert.equal((await client.commitGitChanges("mrs_0001", { message: "Apply patch" })).commitSha, "fakecommit0001");
+    assert.equal((await client.pushGitBranch("mrs_0001", { branchName: "codex/mobile-test" })).pushed, true);
+    assert.equal((await client.createPullRequestPlan("mrs_0001")).ready, true);
+    assert.ok(calls.some((call) => call.includes("/git/repositories/openai/codex-mobile-sample/branches")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
+}
 
 test("runner client starts sandbox build jobs", async () => {
   const originalFetch = globalThis.fetch;
