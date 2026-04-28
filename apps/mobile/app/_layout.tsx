@@ -1,9 +1,10 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import { ProjectProvider } from "@/project/ProjectContext";
 
 export default function RootLayout() {
   return (
-    <>
+    <ProjectProvider>
       <Stack
         screenOptions={{
           headerLargeTitle: true,
@@ -12,6 +13,6 @@ export default function RootLayout() {
         }}
       />
       <StatusBar style="auto" />
-    </>
+    </ProjectProvider>
   );
 }

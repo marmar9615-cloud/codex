@@ -1,6 +1,6 @@
 export const sampleUnifiedDiff = `--- a/src/App.tsx
 +++ b/src/App.tsx
-@@ -1,5 +1,6 @@
+@@ -1,6 +1,6 @@
  import React from "react";
  import { Text } from "react-native";
  

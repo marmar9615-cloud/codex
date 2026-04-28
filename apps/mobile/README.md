@@ -18,6 +18,8 @@ This is the first mobile scaffold for Codex. It is an Expo React Native app with
 - Auth state machine with production ChatGPT/Codex account auth disabled by default.
 - Dev API-key auth flag separated from production auth.
 - Diff review shell backed by shared patch-apply utility tests.
+- Stateful sample-project flow from project list/import to editor, runner job, SSE logs, patch review, and artifact metadata.
+- Runner client methods for session creation, snapshot upload, job start/status, SSE parsing, patch fetch, and artifact fetch.
 
 ## What Is Stubbed
 
@@ -25,7 +27,7 @@ This is the first mobile scaffold for Codex. It is an Expo React Native app with
 - Android SAF directory access. The provider shape exists, but full directory-tree access likely needs a native module or verified Expo API support.
 - iOS security-scoped bookmarks. The provider shape exists, but persistent external-folder access likely needs a native module.
 - GitHub clone/import and commit/push.
-- Real runner streaming in the UI. Use `@codex/mobile-runner` separately for the fake log API.
+- The runner behavior is still fake/deterministic. It does not run Codex core, package managers, compilers, or tests yet.
 
 ## Run Locally
 
@@ -45,6 +47,8 @@ To run the fake runner:
 ```bash
 pnpm --filter @codex/mobile-runner dev
 ```
+
+Then start the app and use `New Sample` -> `Agent` -> `Run Agent` to exercise the fake end-to-end session.
 
 For physical-device development, start with Expo Go. Add an Expo development client only when native SAF/security-scoped bookmark modules or other custom native code are introduced.
 Metro currently reports `exp://127.0.0.1:8081` and `http://localhost:8081` when started with `pnpm --filter @codex/mobile exec expo start --localhost`.

@@ -35,7 +35,8 @@ export function SettingsAuthScreen() {
             ChatGPT/Codex account
           </Text>
           <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
-            Production sign-in is disabled until official mobile auth support is confirmed.
+            Production OAuth remains disabled until OpenAI confirms a supported public ChatGPT/Codex mobile flow.
+            This app will not scrape ChatGPT, collect passwords, reuse browser cookies, or call private endpoints.
           </Text>
           {state.status === "blocked" ? (
             <Text selectable style={{ color: colors.warning, lineHeight: 20 }}>

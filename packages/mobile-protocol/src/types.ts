@@ -13,14 +13,18 @@ export type MobileProject = {
 
 export type RunnerSessionStatus = "created" | "syncing" | "ready" | "running" | "failed" | "closed";
 
-export type RunnerSession = {
+export type MobileSession = {
   id: string;
   projectId: string;
   projectName: string;
+  sourceKind: ProjectSourceKind;
   status: RunnerSessionStatus;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+  snapshotVersion?: number;
 };
+
+export type RunnerSession = MobileSession;
 
 export type CreateSessionRequest = {
   projectId: string;
@@ -39,10 +43,12 @@ export type ProjectSnapshotFile = {
   sha256?: string;
 };
 
-export type UploadSnapshotRequest = {
+export type ProjectSnapshot = {
   files: ProjectSnapshotFile[];
   deletedPaths?: string[];
 };
+
+export type UploadSnapshotRequest = ProjectSnapshot;
 
 export type UploadSnapshotResponse = {
   session: RunnerSession;
@@ -92,21 +98,6 @@ export type RunnerLogEvent = {
 
 export type ArtifactKind = "webPreview" | "testReport" | "apk" | "aab" | "iosBuildLog" | "other";
 
-export type RunnerArtifact = {
-  id: string;
-  sessionId: string;
-  jobId?: string;
-  kind: ArtifactKind;
-  title: string;
-  url?: string;
-  metadata?: Record<string, string>;
-  createdAt: IsoTimestamp;
-};
-
-export type ArtifactListResponse = {
-  artifacts: RunnerArtifact[];
-};
-
 export type PatchLineKind = "context" | "add" | "remove";
 
 export type PatchLine = {
@@ -122,10 +113,21 @@ export type PatchHunk = {
   lines: PatchLine[];
 };
 
-export type PatchFile = {
+export type PatchFileChange = {
   oldPath: string;
   newPath: string;
   hunks: PatchHunk[];
+};
+
+export type PatchFile = PatchFileChange;
+
+export type PatchProposal = {
+  id: string;
+  sessionId: string;
+  summary: string;
+  unifiedDiff: string;
+  files: PatchFileChange[];
+  createdAt: IsoTimestamp;
 };
 
 export type ReceivePatchRequest = {
@@ -158,10 +160,49 @@ export type RunnerJobStatusEvent = {
 export type RunnerArtifactEvent = {
   type: "runner.artifact";
   sessionId: string;
-  artifact: RunnerArtifact;
+  artifact: BuildArtifact;
 };
 
 export type RunnerEvent = RunnerLogEvent | RunnerPatchEvent | RunnerJobStatusEvent | RunnerArtifactEvent;
+
+export type BuildArtifact = {
+  id: string;
+  sessionId: string;
+  jobId?: string;
+  kind: ArtifactKind;
+  title: string;
+  webPreviewUrl?: string;
+  buildLogUrl?: string;
+  apkUrl?: string;
+  iosInstructions?: string;
+  metadata?: Record<string, string>;
+  createdAt: IsoTimestamp;
+};
+
+export type RunnerArtifact = BuildArtifact;
+
+export type ArtifactListResponse = {
+  artifacts: BuildArtifact[];
+};
+
+export type GetSessionResponse = {
+  session: MobileSession;
+};
+
+export type GetJobResponse = {
+  job: RunnerJob;
+};
+
+export type GetPatchResponse = {
+  patch: PatchProposal | null;
+};
+
+export type RunnerError = {
+  error: string;
+  code?: string;
+  sessionId?: string;
+  jobId?: string;
+};
 
 export type MobileAuthProvider = "chatgpt" | "devApiKey";
 

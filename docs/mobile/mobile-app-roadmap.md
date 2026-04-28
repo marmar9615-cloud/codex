@@ -100,6 +100,14 @@ Runs in remote sandbox:
 - Artifact production
 - Codex core/app-server execution until a supported mobile-native Codex runtime exists
 
+## Store Compliance Guardrails
+
+- The mobile app edits app-contained workspaces by default. It must not claim unrestricted access to arbitrary phone files.
+- iOS file access uses the app sandbox first and Files app/document-picker grants where applicable. Persistent external-folder access needs a security-scoped bookmark implementation before it can be represented as durable.
+- Android file access uses app-specific storage first and Storage Access Framework grants for user-selected files or folders. Broad all-files access is out of scope for this roadmap.
+- Heavy builds, tests, dependency installs, shell commands, Gradle, and Xcode-related workflows run in remote sandbox runners, not on the phone.
+- Production ChatGPT/Codex account auth stays gated until OpenAI confirms a supported public mobile OAuth or device-code flow for this client class.
+
 ## MVP Work Items
 
 Phase 0: Foundation in this change
@@ -114,6 +122,7 @@ Phase 0: Foundation in this change
 
 Phase 1: Real runner integration
 
+- Wire the mobile scaffold to the fake runner contract for an end-to-end sample-project session.
 - Host the runner in a sandbox-capable environment.
 - Bridge runner sessions to `codex app-server` v2 over local stdio/unix socket or authenticated websocket.
 - Mirror app-server turn/item notifications into mobile-friendly events.

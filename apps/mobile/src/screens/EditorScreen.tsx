@@ -2,21 +2,20 @@ import { Link, Stack } from "expo-router";
 import { Text, TextInput, View } from "react-native";
 import { ActionButton } from "@/components/ActionButton";
 import { Screen } from "@/components/Screen";
+import { StatusPill } from "@/components/StatusPill";
+import { useProject } from "@/project/ProjectContext";
 import { colors, spacing } from "@/theme";
 
-const sampleCode = `export function greet(name: string) {
-  return \`Hello, \${name}\`;
-}
-`;
-
 export function EditorScreen() {
+  const { activeProject, files, activeFile, activePath, setActivePath, updateActiveFile, saveActiveFile, error } = useProject();
+
   return (
     <>
       <Stack.Screen options={{ title: "Editor" }} />
       <Screen>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           <Link href="/chat" asChild>
-            <ActionButton tone="primary">Chat</ActionButton>
+            <ActionButton tone="primary">Agent</ActionButton>
           </Link>
           <Link href="/diff" asChild>
             <ActionButton>Diff</ActionButton>
@@ -24,6 +23,33 @@ export function EditorScreen() {
           <Link href="/build" asChild>
             <ActionButton>Build</ActionButton>
           </Link>
+          <ActionButton
+            onPress={() => {
+              void saveActiveFile();
+            }}
+            disabled={!activeFile}
+          >
+            Save
+          </ActionButton>
+        </View>
+
+        <View style={{ flexDirection: "row", gap: spacing.sm, flexWrap: "wrap" }}>
+          <StatusPill label={activeProject?.name ?? "No project"} tone={activeProject ? "ready" : "warning"} />
+          <StatusPill label={activePath} tone="muted" />
+        </View>
+
+        {error ? (
+          <Text selectable style={{ color: colors.danger, lineHeight: 20 }}>
+            {error}
+          </Text>
+        ) : null}
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+          {files.map((file) => (
+            <ActionButton key={file.path} tone={file.path === activePath ? "primary" : "secondary"} onPress={() => setActivePath(file.path)}>
+              {file.path}
+            </ActionButton>
+          ))}
         </View>
 
         <View
@@ -36,16 +62,18 @@ export function EditorScreen() {
           }}
         >
           <View style={{ padding: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border }}>
-            <Text style={{ color: colors.text, fontWeight: "800" }}>src/example.ts</Text>
+            <Text style={{ color: colors.text, fontWeight: "800" }}>{activeFile?.path ?? "No file selected"}</Text>
           </View>
           <TextInput
             multiline
-            defaultValue={sampleCode}
+            value={activeFile?.text ?? ""}
+            onChangeText={updateActiveFile}
+            editable={Boolean(activeFile)}
             autoCapitalize="none"
             autoCorrect={false}
             textAlignVertical="top"
             style={{
-              minHeight: 260,
+              minHeight: 300,
               padding: spacing.md,
               backgroundColor: colors.codeBg,
               color: colors.codeText,

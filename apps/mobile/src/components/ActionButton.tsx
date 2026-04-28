@@ -6,9 +6,10 @@ type ActionButtonProps = {
   children: ReactNode;
   onPress?: () => void;
   tone?: "primary" | "secondary" | "danger";
+  disabled?: boolean;
 };
 
-export function ActionButton({ children, onPress, tone = "secondary" }: ActionButtonProps) {
+export function ActionButton({ children, onPress, tone = "secondary", disabled = false }: ActionButtonProps) {
   const backgroundColor =
     tone === "primary" ? colors.accent : tone === "danger" ? colors.danger : colors.surfaceAlt;
   const color = tone === "secondary" ? colors.text : "#ffffff";
@@ -16,6 +17,7 @@ export function ActionButton({ children, onPress, tone = "secondary" }: ActionBu
   return (
     <Pressable
       onPress={onPress}
+      disabled={disabled}
       style={({ pressed }) => ({
         minHeight: 44,
         borderRadius: 8,
@@ -26,7 +28,7 @@ export function ActionButton({ children, onPress, tone = "secondary" }: ActionBu
         backgroundColor,
         borderWidth: tone === "secondary" ? 1 : 0,
         borderColor: colors.border,
-        opacity: pressed ? 0.72 : 1,
+        opacity: disabled ? 0.45 : pressed ? 0.72 : 1,
       })}
     >
       <Text style={{ color, fontWeight: "700" }}>{children}</Text>

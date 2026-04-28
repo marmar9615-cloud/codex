@@ -1,7 +1,19 @@
 import type {
+  BuildArtifact,
   CreateSessionRequest,
+  MobileSession,
+  PatchFileChange,
+  PatchHunk,
+  PatchLine,
+  PatchProposal,
+  ProjectSnapshot,
   ProjectSourceKind,
   ReceivePatchRequest,
+  RunnerError,
+  RunnerEvent,
+  RunnerJob,
+  RunnerJobStatus,
+  RunnerLogEvent,
   StartJobRequest,
   UploadSnapshotRequest,
 } from "./types.js";
@@ -15,6 +27,12 @@ const projectSourceKinds = new Set<ProjectSourceKind>([
 ]);
 
 const commandKinds = new Set(["build", "test", "preview", "custom"]);
+const sessionStatuses = new Set(["created", "syncing", "ready", "running", "failed", "closed"]);
+const jobStatuses = new Set<RunnerJobStatus>(["queued", "running", "succeeded", "failed", "canceled"]);
+const logStreams = new Set(["stdout", "stderr", "system"]);
+const logLevels = new Set(["debug", "info", "warn", "error"]);
+const artifactKinds = new Set(["webPreview", "testReport", "apk", "aab", "iosBuildLog", "other"]);
+const patchLineKinds = new Set(["context", "add", "remove"]);
 
 export class ProtocolValidationError extends Error {
   constructor(message: string) {
@@ -36,13 +54,10 @@ export function assertCreateSessionRequest(value: unknown): CreateSessionRequest
   };
 }
 
-export function assertUploadSnapshotRequest(value: unknown): UploadSnapshotRequest {
+export function assertProjectSnapshot(value: unknown): ProjectSnapshot {
   const object = expectRecord(value, "upload snapshot request");
-  if (!Array.isArray(object.files)) {
-    throw new ProtocolValidationError("files must be an array");
-  }
   return {
-    files: object.files.map((file, index) => {
+    files: expectArray(object.files, "files").map((file, index) => {
       const entry = expectRecord(file, `files[${index}]`);
       return {
         path: expectString(entry.path, `files[${index}].path`),
@@ -53,6 +68,10 @@ export function assertUploadSnapshotRequest(value: unknown): UploadSnapshotReque
     }),
     deletedPaths: optionalStringArray(object.deletedPaths, "deletedPaths"),
   };
+}
+
+export function assertUploadSnapshotRequest(value: unknown): UploadSnapshotRequest {
+  return assertProjectSnapshot(value);
 }
 
 export function assertStartJobRequest(value: unknown): StartJobRequest {
@@ -66,7 +85,7 @@ export function assertStartJobRequest(value: unknown): StartJobRequest {
   }
   return {
     kind: kind as StartJobRequest["kind"],
-    command: object.command.map((part, index) => expectString(part, `command[${index}]`)),
+    command: expectArray(object.command, "command").map((part, index) => expectString(part, `command[${index}]`)),
     cwd: optionalString(object.cwd, "cwd"),
     environmentId: optionalString(object.environmentId, "environmentId"),
   };
@@ -81,6 +100,183 @@ export function assertReceivePatchRequest(value: unknown): ReceivePatchRequest {
   };
 }
 
+export function assertMobileSession(value: unknown): MobileSession {
+  const object = expectRecord(value, "mobile session");
+  const sourceKind = expectString(object.sourceKind, "sourceKind");
+  if (!projectSourceKinds.has(sourceKind as ProjectSourceKind)) {
+    throw new ProtocolValidationError(`unsupported sourceKind: ${sourceKind}`);
+  }
+  const status = expectString(object.status, "status");
+  if (!sessionStatuses.has(status)) {
+    throw new ProtocolValidationError(`unsupported session status: ${status}`);
+  }
+  return {
+    id: expectString(object.id, "id"),
+    projectId: expectString(object.projectId, "projectId"),
+    projectName: expectString(object.projectName, "projectName"),
+    sourceKind: sourceKind as ProjectSourceKind,
+    status: status as MobileSession["status"],
+    createdAt: expectString(object.createdAt, "createdAt"),
+    updatedAt: expectString(object.updatedAt, "updatedAt"),
+    snapshotVersion: optionalNumber(object.snapshotVersion, "snapshotVersion"),
+  };
+}
+
+export function assertRunnerJob(value: unknown): RunnerJob {
+  const object = expectRecord(value, "runner job");
+  const kind = expectString(object.kind, "kind");
+  if (!commandKinds.has(kind)) {
+    throw new ProtocolValidationError(`unsupported command kind: ${kind}`);
+  }
+  const status = expectString(object.status, "status");
+  if (!jobStatuses.has(status as RunnerJobStatus)) {
+    throw new ProtocolValidationError(`unsupported job status: ${status}`);
+  }
+  return {
+    id: expectString(object.id, "id"),
+    sessionId: expectString(object.sessionId, "sessionId"),
+    kind: kind as RunnerJob["kind"],
+    command: expectArray(object.command, "command").map((part, index) => expectString(part, `command[${index}]`)),
+    status: status as RunnerJobStatus,
+    createdAt: expectString(object.createdAt, "createdAt"),
+    updatedAt: expectString(object.updatedAt, "updatedAt"),
+  };
+}
+
+export function assertRunnerLogEvent(value: unknown): RunnerLogEvent {
+  const object = expectRecord(value, "runner log event");
+  const type = expectString(object.type, "type");
+  if (type !== "runner.log") {
+    throw new ProtocolValidationError(`unsupported event type: ${type}`);
+  }
+  const stream = expectString(object.stream, "stream");
+  if (!logStreams.has(stream)) {
+    throw new ProtocolValidationError(`unsupported log stream: ${stream}`);
+  }
+  const level = expectString(object.level, "level");
+  if (!logLevels.has(level)) {
+    throw new ProtocolValidationError(`unsupported log level: ${level}`);
+  }
+  return {
+    type: "runner.log",
+    sessionId: expectString(object.sessionId, "sessionId"),
+    jobId: expectString(object.jobId, "jobId"),
+    sequence: expectNumber(object.sequence, "sequence"),
+    stream: stream as RunnerLogEvent["stream"],
+    level: level as RunnerLogEvent["level"],
+    message: expectString(object.message, "message"),
+    createdAt: expectString(object.createdAt, "createdAt"),
+  };
+}
+
+export function assertPatchProposal(value: unknown): PatchProposal {
+  const object = expectRecord(value, "patch proposal");
+  return {
+    id: expectString(object.id, "id"),
+    sessionId: expectString(object.sessionId, "sessionId"),
+    summary: expectString(object.summary, "summary"),
+    unifiedDiff: expectString(object.unifiedDiff, "unifiedDiff"),
+    files: expectArray(object.files, "files").map(assertPatchFileChange),
+    createdAt: expectString(object.createdAt, "createdAt"),
+  };
+}
+
+export function assertBuildArtifact(value: unknown): BuildArtifact {
+  const object = expectRecord(value, "build artifact");
+  const kind = expectString(object.kind, "kind");
+  if (!artifactKinds.has(kind)) {
+    throw new ProtocolValidationError(`unsupported artifact kind: ${kind}`);
+  }
+  return {
+    id: expectString(object.id, "id"),
+    sessionId: expectString(object.sessionId, "sessionId"),
+    jobId: optionalString(object.jobId, "jobId"),
+    kind: kind as BuildArtifact["kind"],
+    title: expectString(object.title, "title"),
+    webPreviewUrl: optionalString(object.webPreviewUrl, "webPreviewUrl"),
+    buildLogUrl: optionalString(object.buildLogUrl, "buildLogUrl"),
+    apkUrl: optionalString(object.apkUrl, "apkUrl"),
+    iosInstructions: optionalString(object.iosInstructions, "iosInstructions"),
+    metadata: optionalStringRecord(object.metadata, "metadata"),
+    createdAt: expectString(object.createdAt, "createdAt"),
+  };
+}
+
+export function assertRunnerError(value: unknown): RunnerError {
+  const object = expectRecord(value, "runner error");
+  return {
+    error: expectString(object.error, "error"),
+    code: optionalString(object.code, "code"),
+    sessionId: optionalString(object.sessionId, "sessionId"),
+    jobId: optionalString(object.jobId, "jobId"),
+  };
+}
+
+export function assertRunnerEvent(value: unknown): RunnerEvent {
+  const object = expectRecord(value, "runner event");
+  const type = expectString(object.type, "type");
+  if (type === "runner.log") {
+    return assertRunnerLogEvent(object);
+  }
+  if (type === "runner.jobStatus") {
+    return {
+      type: "runner.jobStatus",
+      sessionId: expectString(object.sessionId, "sessionId"),
+      job: assertRunnerJob(object.job),
+    };
+  }
+  if (type === "runner.patch") {
+    return {
+      type: "runner.patch",
+      sessionId: expectString(object.sessionId, "sessionId"),
+      patchId: expectString(object.patchId, "patchId"),
+      summary: expectString(object.summary, "summary"),
+      unifiedDiff: expectString(object.unifiedDiff, "unifiedDiff"),
+      createdAt: expectString(object.createdAt, "createdAt"),
+    };
+  }
+  if (type === "runner.artifact") {
+    return {
+      type: "runner.artifact",
+      sessionId: expectString(object.sessionId, "sessionId"),
+      artifact: assertBuildArtifact(object.artifact),
+    };
+  }
+  throw new ProtocolValidationError(`unsupported event type: ${type}`);
+}
+
+function assertPatchFileChange(value: unknown, index: number): PatchFileChange {
+  const object = expectRecord(value, `files[${index}]`);
+  return {
+    oldPath: expectString(object.oldPath, `files[${index}].oldPath`),
+    newPath: expectString(object.newPath, `files[${index}].newPath`),
+    hunks: expectArray(object.hunks, `files[${index}].hunks`).map(assertPatchHunk),
+  };
+}
+
+function assertPatchHunk(value: unknown, index: number): PatchHunk {
+  const object = expectRecord(value, `hunks[${index}]`);
+  return {
+    oldStart: expectNumber(object.oldStart, `hunks[${index}].oldStart`),
+    oldLines: expectNumber(object.oldLines, `hunks[${index}].oldLines`),
+    newStart: expectNumber(object.newStart, `hunks[${index}].newStart`),
+    newLines: expectNumber(object.newLines, `hunks[${index}].newLines`),
+    lines: expectArray(object.lines, `hunks[${index}].lines`).map(assertPatchLine),
+  };
+}
+
+function assertPatchLine(value: unknown, index: number): PatchLine {
+  const object = expectRecord(value, `lines[${index}]`);
+  const kind = expectString(object.kind, `lines[${index}].kind`);
+  if (!patchLineKinds.has(kind)) {
+    throw new ProtocolValidationError(`unsupported patch line kind: ${kind}`);
+  }
+  return {
+    kind: kind as PatchLine["kind"],
+    text: expectAnyString(object.text, `lines[${index}].text`),
+  };
+}
+
 function expectRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ProtocolValidationError(`${label} must be an object`);
@@ -88,9 +284,30 @@ function expectRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function expectArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new ProtocolValidationError(`${label} must be an array`);
+  }
+  return value;
+}
+
 function expectString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new ProtocolValidationError(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function expectAnyString(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new ProtocolValidationError(`${label} must be a string`);
+  }
+  return value;
+}
+
+function expectNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ProtocolValidationError(`${label} must be a finite number`);
   }
   return value;
 }
@@ -110,4 +327,21 @@ function optionalStringArray(value: unknown, label: string): string[] | undefine
     throw new ProtocolValidationError(`${label} must be a string array`);
   }
   return value.map((entry, index) => expectString(entry, `${label}[${index}]`));
+}
+
+function optionalNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return expectNumber(value, label);
+}
+
+function optionalStringRecord(value: unknown, label: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const record = expectRecord(value, label);
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [key, expectString(entry, `${label}.${key}`)]),
+  );
 }
