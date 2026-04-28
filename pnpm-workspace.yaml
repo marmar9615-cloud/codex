@@ -1,7 +1,10 @@
 packages:
+  - apps/mobile
   - codex-cli
+  - packages/*
   - codex-rs/responses-api-proxy/npm
   - sdk/typescript
+  - services/*
 
 ignoredBuiltDependencies:
   - esbuild

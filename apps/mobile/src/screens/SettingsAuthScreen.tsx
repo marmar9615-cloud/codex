@@ -1,0 +1,98 @@
+import { Stack } from "expo-router";
+import { useMemo, useState } from "react";
+import { Text, TextInput, View } from "react-native";
+import { reduceMobileAuthState } from "@codex/mobile-protocol";
+import type { MobileAuthState } from "@codex/mobile-protocol";
+import { ActionButton } from "@/components/ActionButton";
+import { Screen } from "@/components/Screen";
+import { StatusPill } from "@/components/StatusPill";
+import { authFeatureFlags } from "@/config/features";
+import { colors, spacing } from "@/theme";
+
+export function SettingsAuthScreen() {
+  const [state, setState] = useState<MobileAuthState>({ status: "signedOut" });
+  const [devKey, setDevKey] = useState("");
+  const statusTone = useMemo(() => {
+    if (state.status === "authenticated") {
+      return "ready";
+    }
+    if (state.status === "blocked") {
+      return "warning";
+    }
+    if (state.status === "error") {
+      return "danger";
+    }
+    return "muted";
+  }, [state.status]);
+
+  return (
+    <>
+      <Stack.Screen options={{ title: "Auth" }} />
+      <Screen>
+        <View style={{ gap: spacing.sm }}>
+          <StatusPill label={state.status} tone={statusTone} />
+          <Text selectable style={{ color: colors.text, fontSize: 18, fontWeight: "800" }}>
+            ChatGPT/Codex account
+          </Text>
+          <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            Production sign-in is disabled until official mobile auth support is confirmed.
+          </Text>
+          {state.status === "blocked" ? (
+            <Text selectable style={{ color: colors.warning, lineHeight: 20 }}>
+              {state.reason}
+            </Text>
+          ) : null}
+          <ActionButton
+            tone="primary"
+            onPress={() =>
+              setState((current) => reduceMobileAuthState(current, { type: "startChatgpt" }, authFeatureFlags))
+            }
+          >
+            Continue
+          </ActionButton>
+        </View>
+
+        <View
+          style={{
+            backgroundColor: colors.surface,
+            borderColor: colors.border,
+            borderWidth: 1,
+            borderRadius: 8,
+            padding: spacing.md,
+            gap: spacing.sm,
+          }}
+        >
+          <Text selectable style={{ color: colors.text, fontWeight: "800" }}>
+            Dev API key
+          </Text>
+          <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            Local testing only. Normal users should not need this.
+          </Text>
+          <TextInput
+            value={devKey}
+            onChangeText={setDevKey}
+            placeholder="sk-..."
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={{
+              minHeight: 44,
+              borderColor: colors.border,
+              borderWidth: 1,
+              borderRadius: 8,
+              paddingHorizontal: spacing.md,
+              color: colors.text,
+            }}
+          />
+          <ActionButton
+            onPress={() =>
+              setState((current) => reduceMobileAuthState(current, { type: "enableDevApiKey" }, authFeatureFlags))
+            }
+          >
+            Enable Dev Mode
+          </ActionButton>
+        </View>
+      </Screen>
+    </>
+  );
+}
