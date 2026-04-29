@@ -6,11 +6,15 @@
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "test:mobile:all": "node scripts/mobile-test-all.mjs",
+    "test:mobile:qa-report": "node scripts/mobile-qa-report.mjs",
+    "test:mobile:e2e:web": "pnpm --filter @codex/mobile test:e2e:web",
     "test:mobile:e2e:maestro:check": "node scripts/mobile-maestro-check.mjs",
+    "test:mobile:e2e:eas:validate": "node scripts/mobile-eas-workflow-validate.mjs",
     "mobile:qa-report": "node scripts/mobile-qa-report.mjs",
     "write-hooks-schema": "cargo run --manifest-path ./codex-rs/Cargo.toml -p codex-hooks --bin write_hooks_schema_fixtures"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "prettier": "^3.5.3"
   },
   "resolutions": {

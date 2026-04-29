@@ -7,13 +7,13 @@ Status: optional manual/agentic QA. This does not replace `pnpm test:mobile:all`
 - Runner is available locally:
 
 ```bash
-pnpm --filter @codex/mobile-runner dev
+PORT=8787 RUNNER_MODE=fake SANDBOX_BACKEND=fake GIT_PROVIDER=fake CLOUD_RUNNER_PROVIDER=fake RUNNER_AUTH_MODE=dev pnpm --filter @codex/mobile-runner dev
 ```
 
-- Expo is available locally:
+- Expo web or a simulator/device target is available locally:
 
 ```bash
-pnpm --filter @codex/mobile exec expo start --localhost
+APP_PUBLIC_CODEX_RUNNER_URL=http://127.0.0.1:8787 pnpm --filter @codex/mobile exec expo start --web --localhost --port 8099
 ```
 
 - Browser, simulator, or device access is available.
@@ -21,7 +21,7 @@ pnpm --filter @codex/mobile exec expo start --localhost
 
 ## Checklist
 
-1. Open Codex Mobile in Expo web or a simulator/device.
+1. Open Codex Mobile in Expo web at `http://localhost:8099` or a simulator/device.
 2. Confirm Project List appears and does not claim broad phone filesystem access.
 3. Create a sample project.
 4. Confirm Editor appears with file tree and `src/App.tsx`.
@@ -63,6 +63,16 @@ Include:
 - pass/fail/skipped per checklist item,
 - screenshots or artifact paths if captured outside git,
 - exact failures and reproduction notes.
+
+## Current Local Result
+
+The latest Codex in-app browser pass is recorded in:
+
+```text
+docs/mobile/qa-evidence/latest-computer-use-qa.md
+```
+
+That run passed against Expo web and the fake local runner. Native simulator/device and Maestro runs remain separate optional evidence paths.
 
 ## Skip Rules
 

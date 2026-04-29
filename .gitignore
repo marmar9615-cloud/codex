@@ -71,6 +71,7 @@ coverage/
 # mobile QA / E2E artifacts
 test-results/
 playwright-report/
+output/playwright/
 maestro-results/
 .maestro-results/
 qa-screenshots/

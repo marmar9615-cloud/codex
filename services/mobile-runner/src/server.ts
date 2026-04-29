@@ -147,6 +147,14 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
   };
 
   return http.createServer(async (request, response) => {
+    if (state.config.runnerAuthMode === "dev") {
+      applyDevCorsHeaders(response);
+    }
+    if (request.method === "OPTIONS" && state.config.runnerAuthMode === "dev") {
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     try {
       await routeRequest(request, response, state, now);
     } catch (error) {
@@ -161,6 +169,12 @@ export function createMobileRunnerServer(options: MobileRunnerServerOptions = {}
       });
     }
   });
+}
+
+function applyDevCorsHeaders(response: http.ServerResponse): void {
+  response.setHeader("Access-Control-Allow-Origin", "*");
+  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  response.setHeader("Access-Control-Allow-Headers", "content-type, authorization, x-request-id");
 }
 
 export async function startMobileRunner(

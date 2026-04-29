@@ -1,6 +1,6 @@
 # Mobile QA Test Matrix
 
-Status: Milestone 6.5 QA gate.
+Status: Milestone 6.6 QA execution pass.
 
 Normal CI should run `pnpm test:mobile:all`. Optional live/device tests are evidence boosters, not required for the reliable gate.
 
@@ -17,21 +17,21 @@ Normal CI should run `pnpm test:mobile:all`. Optional live/device tests are evid
 | Sandbox command policy | Unit | `pnpm --filter @codex/mobile-runner test` | Raw shell/traversal/custom commands rejected by default | Node/pnpm | Yes | Implemented |
 | Local Docker backend unavailable path | Unit | `pnpm --filter @codex/mobile-runner test` | Missing Docker returns structured error | Node/pnpm, no Docker required | Yes | Implemented |
 | Optional live Docker backend | Optional live | `ENABLE_LIVE_DOCKER_SANDBOX_TESTS=1 pnpm --filter @codex/mobile-runner test` | Container runs allowlisted command | Docker daemon | No | Skipped by default |
-| Mobile project import | Unit/source contract + Maestro | `pnpm --filter @codex/mobile test`; optional `pnpm test:mobile:e2e:maestro:check` | Stable fake import test ID exists; device flow imports sample repo | Node/pnpm; optional Maestro/device | Source contract yes, device no | Implemented plus optional |
-| Mobile sample editor/save | Unit/source contract + Maestro | `pnpm --filter @codex/mobile test`; optional Maestro sample flow | Editor/save controls are addressable | Node/pnpm; optional Maestro/device | Source contract yes, device no | Implemented plus optional |
-| Mobile AgentChat fake runner flow | Maestro/manual | `.maestro/fake_agent_patch_flow.yml` | Logs appear and patch review opens | Runner, app build, Maestro, simulator/emulator | No | Added, not blocking |
+| Mobile project import | Unit/source contract + Maestro/browser | `pnpm --filter @codex/mobile test`; optional `pnpm test:mobile:e2e:maestro:check`; browser QA evidence | Stable fake import test ID exists; fake repo imports in browser QA | Node/pnpm; optional Maestro/device or browser | Source contract yes, device no | Implemented; browser pass; Maestro skipped locally |
+| Mobile sample editor/save | Unit/source contract + Maestro/browser | `pnpm --filter @codex/mobile test`; `pnpm test:mobile:e2e:web`; optional Maestro sample flow | Editor/save controls are addressable and web workspace fallback saves | Node/pnpm; optional Maestro/device | Source contract yes, web yes, device no | Implemented; web pass; Maestro skipped locally |
+| Mobile AgentChat fake runner flow | Maestro/manual browser QA | `.maestro/fake_agent_patch_flow.yml`; `docs/mobile/qa-evidence/latest-computer-use-qa.md` | Logs appear and patch review opens | Runner, app build, Maestro/simulator or Expo web/browser | No | Browser pass; Maestro skipped locally |
 | Mobile DiffReview accept/reject flow | Unit/source contract + Maestro | `pnpm --filter @codex/mobile test`; optional Maestro | Apply/reject controls exist and patch helpers enforce safety | Node/pnpm; optional Maestro/device | Source contract yes, device no | Implemented plus optional |
-| Mobile BuildRunner install/test/build flow | Source contract + Maestro | `pnpm --filter @codex/mobile test`; `.maestro/fake_build_runner_flow.yml` | Safe action controls exist and fake artifacts show | Node/pnpm; optional Maestro/device | Source contract yes, device no | Implemented plus optional |
-| Mobile Git publish fake flow | Source contract + Maestro | `pnpm --filter @codex/mobile test`; `.maestro/fake_git_publish_flow.yml` | Commit/push/PR controls exist; device flow exercises fake provider | Node/pnpm; optional Maestro/device | Source contract yes, device no | Implemented plus optional |
+| Mobile BuildRunner install/test/build flow | Source contract + Maestro/browser | `pnpm --filter @codex/mobile test`; `.maestro/fake_build_runner_flow.yml`; browser QA evidence | Safe action controls exist and fake artifacts show | Node/pnpm; optional Maestro/device or browser | Source contract yes, browser yes, device no | Implemented; browser pass; Maestro skipped locally |
+| Mobile Git publish fake flow | Source contract + Maestro/browser | `pnpm --filter @codex/mobile test`; `.maestro/fake_git_publish_flow.yml`; browser QA evidence | Commit/push/PR controls exist; fake provider reaches PR plan | Node/pnpm; optional Maestro/device or browser | Source contract yes, browser yes, device no | Implemented; browser pass; Maestro skipped locally |
 | Settings/Auth gated messaging | Unit/source contract | `pnpm --filter @codex/mobile test` | Production OAuth copy remains gated | Node/pnpm | Yes | Implemented |
 | App Store safety copy | Docs/config sanity | `node scripts/mobile-docs-sanity.mjs` | Forbidden filesystem/local terminal claims absent | Node | Yes | Implemented |
 | EAS config validation | Config | `pnpm --filter @codex/mobile exec expo config --type public --json`; `node -e 'JSON.parse(...)'` | Expo public config and EAS JSON parse | Node/pnpm | Yes | Implemented |
 | Store release docs sanity | Docs/config sanity | `node scripts/mobile-docs-sanity.mjs` | Required release/QA docs exist | Node | Yes | Implemented |
 | No secrets exposed to mobile | Source/config sanity | `node scripts/mobile-docs-sanity.mjs`; `pnpm --filter @codex/mobile test` | Server-only secret placeholders absent from mobile source | Node | Yes | Implemented |
-| Expo web smoke | Web smoke | `pnpm --filter @codex/mobile test:e2e:web` | Skips cleanly until `react-native-web` is installed; then Expo web serves HTML root | Node/pnpm, free local port, `react-native-web` | No | Added, skipped locally |
-| Maestro E2E scaffolding | Device E2E | `RUN_MAESTRO_E2E=1 MAESTRO_APP_ID=... pnpm test:mobile:e2e:maestro:check` | Maestro runs all flows | Maestro, app build, simulator/emulator | No | Added, skipped unless env exists |
-| EAS Android E2E workflow | Cloud E2E | EAS workflow `.eas/workflows/e2e-android.yml` | Builds APK and runs Maestro flows | EAS project credentials | No | Added, not run locally |
-| EAS iOS E2E workflow | Cloud E2E | EAS workflow `.eas/workflows/e2e-ios.yml` | Builds simulator app and runs Maestro flows | EAS project credentials | No | Added, not run locally |
+| Expo web smoke | Web smoke | `pnpm test:mobile:e2e:web` | Starts fake runner + Expo web, opens browser, verifies ProjectList, sample save, auth gated copy, and runner UI | Node/pnpm, free local ports, Playwright Chromium | No | Implemented and passing locally |
+| Maestro E2E scaffolding | Device E2E | `RUN_MAESTRO_E2E=1 MAESTRO_APP_ID=... pnpm test:mobile:e2e:maestro:check` | Maestro runs all flows | Maestro, app build, simulator/emulator | No | Added; skipped locally because CLI/simulator/app target missing |
+| EAS Android E2E workflow | Cloud E2E validation | `pnpm test:mobile:e2e:eas:validate`; later `npx eas-cli@latest workflow:run .eas/workflows/e2e-android.yml` | Workflow references real Maestro flows and E2E profile | Node/pnpm; EAS credentials only for cloud execution | Validation yes, cloud no | Path/profile validation passing locally; cloud not run |
+| EAS iOS E2E workflow | Cloud E2E validation | `pnpm test:mobile:e2e:eas:validate`; later `npx eas-cli@latest workflow:run .eas/workflows/e2e-ios.yml` | Workflow references real Maestro flows and iOS simulator profile | Node/pnpm; EAS credentials only for cloud execution | Validation yes, cloud no | Path/profile validation passing locally; cloud not run |
 
 ## Normal Gate
 

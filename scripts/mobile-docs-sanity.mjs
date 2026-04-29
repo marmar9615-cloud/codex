@@ -4,6 +4,10 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 const requiredFiles = [
   "docs/mobile/qa-test-matrix.md",
   "docs/mobile/codex-computer-use-qa-checklist.md",
+  "docs/mobile/qa-evidence/latest-computer-use-qa.md",
+  "docs/mobile/qa-evidence/latest-local-qa.md",
+  "docs/mobile/qa-evidence/latest-maestro-local-qa.md",
+  "docs/mobile/qa-evidence/latest-web-smoke-qa.md",
   "docs/mobile/mobile-app-roadmap.md",
   "docs/mobile/app-review-risk-checklist.md",
   "docs/mobile/release-ios-app-store.md",

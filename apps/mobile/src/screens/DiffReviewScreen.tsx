@@ -7,10 +7,11 @@ import { useProject } from "@/project/ProjectContext";
 import { colors, spacing } from "@/theme";
 
 export function DiffReviewScreen() {
-  const { patch, patchDecision, applyPatchDecision, error } = useProject();
+  const { activeProject, patch, patchDecision, applyPatchDecision, error } = useProject();
   const unifiedDiff = patch?.unifiedDiff ?? "";
   const unsupported = patch?.status === "unsupported" || (patch?.unsupportedChanges ?? 0) > 0;
   const hasChanges = (patch?.filesChanged ?? patch?.files.length ?? 0) > 0;
+  const canCommitToBranch = activeProject?.sourceKind === "github" && activeProject.runnerSessionId !== undefined;
 
   return (
     <>
@@ -121,7 +122,7 @@ export function DiffReviewScreen() {
           >
             Reject Patch
           </ActionButton>
-          {patchDecision === "accepted" ? (
+          {patchDecision === "accepted" && canCommitToBranch ? (
             <Link href="/git" asChild>
               <ActionButton accessibilityLabel="Open Git publish after patch" testID="mobile-diff-open-git">Commit to Branch</ActionButton>
             </Link>

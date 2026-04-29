@@ -296,6 +296,16 @@ pnpm test:mobile:all
 
 That command runs protocol build/tests, runner build/tests, mobile tests/typecheck, Expo config validation, EAS JSON validation, docs/config sanity checks, and `git diff --check`. It intentionally skips Docker, live GitHub, live cloud, EAS credentials, simulators, emulators, and Maestro unless explicitly enabled. See `docs/mobile/qa-test-matrix.md` and `docs/mobile/qa-evidence/latest-local-qa.md` for the current QA contract and latest local evidence.
 
+Milestone 6.6 exercises the QA harness in the local environment:
+
+- `react-native-web`, `react-dom`, `@expo/metro-runtime`, and Playwright are now installed for optional Expo web smoke testing.
+- `pnpm test:mobile:e2e:web` starts the fake runner, starts Expo web, opens a browser, verifies ProjectList, opens/saves a sample workspace, verifies Settings/Auth gated copy, and checks runner capability UI.
+- Expo web uses a web-only in-memory app-workspace fallback because native `expo-file-system` directory APIs are not available in web builds. iOS/Android still use app storage and user-granted document access abstractions.
+- The mobile runner handles local web CORS preflight requests in dev auth mode so browser QA can call the runner API. This does not make app-server public; the app still talks only to the mobile runner.
+- Codex in-app browser QA passed against Expo web for sample project, fake agent patch apply, fake Build Runner, fake Git import/commit/push/PR plan, and production OAuth gated copy.
+- Maestro local E2E remains skipped until Maestro CLI plus an installable simulator/emulator app target are available.
+- EAS E2E workflows are path/profile validated locally; cloud workflow execution still requires EAS credentials and an explicit human trigger.
+
 ## Next Milestone
 
 The next real build step is implementing one production-grade server-side integration lane: either the GitHub App install/clone/commit/push flow or a real cloud sandbox provider adapter with durable job/artifact persistence. Both should stay server-side, keep secrets out of mobile, and preserve branch-first user approval.

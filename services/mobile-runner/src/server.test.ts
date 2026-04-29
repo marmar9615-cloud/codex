@@ -431,6 +431,24 @@ test("runner rejects snapshots that escape the workspace", async () => {
   }
 });
 
+test("runner responds to local web preflight requests without credentials", async () => {
+  const { server, url } = await startMobileRunner({ port: 0 });
+  try {
+    const response = await fetch(`${url}/capabilities`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost:8099",
+        "Access-Control-Request-Method": "GET",
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get("access-control-allow-origin"), "*");
+    assert.match(response.headers.get("access-control-allow-methods") ?? "", /GET/);
+  } finally {
+    server.close();
+  }
+});
+
 async function get<T>(baseUrl: string, path: string): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`);
   assert.ok(response.ok, `${path} returned ${response.status}`);

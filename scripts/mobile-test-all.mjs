@@ -10,6 +10,7 @@ const commands = [
   ["pnpm", ["--filter", "@codex/mobile", "typecheck"]],
   ["pnpm", ["--filter", "@codex/mobile", "exec", "expo", "config", "--type", "public", "--json"]],
   ["node", ["-e", "JSON.parse(require('fs').readFileSync('apps/mobile/eas.json','utf8')); console.log('eas.json valid')"]],
+  ["node", ["scripts/mobile-eas-workflow-validate.mjs"]],
   ["node", ["scripts/mobile-docs-sanity.mjs"]],
   ["git", ["diff", "--check"]],
 ];
