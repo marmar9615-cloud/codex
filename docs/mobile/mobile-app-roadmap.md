@@ -288,6 +288,14 @@ CLOUD_RUNNER_PROVIDER=kubernetes
 
 Only `fake` is implemented. The control plane now has provider interfaces, in-memory job records, quota policy, audit log store, artifact store, cleanup policy, and dev auth scaffolding. Production cloud sandbox execution still requires a real provider adapter, durable persistence, object storage, production API auth, monitoring, cleanup workers, and abuse controls.
 
+Milestone 6.5 adds the mobile QA gate. Normal verification is now:
+
+```bash
+pnpm test:mobile:all
+```
+
+That command runs protocol build/tests, runner build/tests, mobile tests/typecheck, Expo config validation, EAS JSON validation, docs/config sanity checks, and `git diff --check`. It intentionally skips Docker, live GitHub, live cloud, EAS credentials, simulators, emulators, and Maestro unless explicitly enabled. See `docs/mobile/qa-test-matrix.md` and `docs/mobile/qa-evidence/latest-local-qa.md` for the current QA contract and latest local evidence.
+
 ## Next Milestone
 
 The next real build step is implementing one production-grade server-side integration lane: either the GitHub App install/clone/commit/push flow or a real cloud sandbox provider adapter with durable job/artifact persistence. Both should stay server-side, keep secrets out of mobile, and preserve branch-first user approval.

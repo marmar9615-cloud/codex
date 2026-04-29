@@ -55,6 +55,7 @@ export function BuildRunnerScreen() {
         ) : null}
 
         <View
+          testID="mobile-build-runner-logs"
           style={{
             backgroundColor: colors.codeBg,
             borderRadius: 8,
@@ -75,6 +76,8 @@ export function BuildRunnerScreen() {
               key={action.commandKind}
               tone="primary"
               disabled={busy || !availableCommands.has(action.commandKind)}
+              accessibilityLabel={`Start ${action.label}`}
+              testID={`mobile-build-start-${action.commandKind}`}
               onPress={() => {
                 void runBuildJob(action.commandKind);
               }}
@@ -85,6 +88,8 @@ export function BuildRunnerScreen() {
           <ActionButton
             tone="secondary"
             disabled={busy}
+            accessibilityLabel="Start agent fix pass"
+            testID="mobile-build-agent-fix-pass"
             onPress={() => {
               void runRunnerFlow("Build/test this project and propose a fix if needed.");
             }}

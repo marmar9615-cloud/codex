@@ -78,6 +78,8 @@ export function GitPublishScreen() {
             value={message}
             onChangeText={setMessage}
             multiline
+            accessibilityLabel="Git commit message"
+            testID="mobile-git-commit-message"
             style={{
               minHeight: 72,
               borderColor: colors.border,
@@ -91,6 +93,8 @@ export function GitPublishScreen() {
           <ActionButton
             tone="primary"
             disabled={!gitAvailable}
+            accessibilityLabel="Commit to feature branch"
+            testID="mobile-git-commit"
             onPress={() => {
               void commitActiveWorkspace(message);
             }}
@@ -102,6 +106,8 @@ export function GitPublishScreen() {
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           <ActionButton
             disabled={!canPush}
+            accessibilityLabel="Push feature branch"
+            testID="mobile-git-push"
             onPress={() => {
               void pushActiveBranch();
             }}
@@ -110,6 +116,8 @@ export function GitPublishScreen() {
           </ActionButton>
           <ActionButton
             disabled={!canPlan}
+            accessibilityLabel="Prepare pull request plan"
+            testID="mobile-git-pr-plan"
             onPress={() => {
               void createPullRequestPlan();
             }}

@@ -29,7 +29,7 @@ export function AgentChatScreen() {
           </Text>
         ) : null}
 
-        <View style={{ gap: spacing.sm }}>
+        <View testID="mobile-agent-chat-logs" style={{ gap: spacing.sm }}>
           {chatMessages.map((message, index) => (
             <View
               key={`${message.role}-${index}`}
@@ -51,6 +51,8 @@ export function AgentChatScreen() {
         </View>
         <TextInput
           multiline
+          accessibilityLabel="Agent prompt"
+          testID="mobile-agent-prompt"
           value={draft}
           onChangeText={setDraft}
           style={{
@@ -68,6 +70,8 @@ export function AgentChatScreen() {
           <ActionButton
             tone="primary"
             disabled={busy || draft.trim().length === 0}
+            accessibilityLabel="Start fake agent job"
+            testID="mobile-agent-start-fake-job"
             onPress={() => {
               const prompt = draft.trim();
               setDraft("");
@@ -80,7 +84,7 @@ export function AgentChatScreen() {
           >
             Run Agent
           </ActionButton>
-          <ActionButton disabled={!patch} onPress={() => router.push("/diff")}>
+          <ActionButton accessibilityLabel="Review agent patch" testID="mobile-agent-review-patch" disabled={!patch} onPress={() => router.push("/diff")}>
             Review Patch
           </ActionButton>
         </View>

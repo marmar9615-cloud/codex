@@ -102,6 +102,8 @@ export function DiffReviewScreen() {
           <ActionButton
             tone="primary"
             disabled={!patch || !hasChanges || unsupported || patchDecision === "accepted"}
+            accessibilityLabel="Apply reviewed patch"
+            testID="mobile-diff-apply-patch"
             onPress={() => {
               void applyPatchDecision(true);
             }}
@@ -111,6 +113,8 @@ export function DiffReviewScreen() {
           <ActionButton
             tone="danger"
             disabled={!patch || patchDecision === "rejected"}
+            accessibilityLabel="Reject reviewed patch"
+            testID="mobile-diff-reject-patch"
             onPress={() => {
               void applyPatchDecision(false);
             }}
@@ -119,7 +123,7 @@ export function DiffReviewScreen() {
           </ActionButton>
           {patchDecision === "accepted" ? (
             <Link href="/git" asChild>
-              <ActionButton>Commit to Branch</ActionButton>
+              <ActionButton accessibilityLabel="Open Git publish after patch" testID="mobile-diff-open-git">Commit to Branch</ActionButton>
             </Link>
           ) : null}
         </View>

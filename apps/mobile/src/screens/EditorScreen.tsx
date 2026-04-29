@@ -15,15 +15,20 @@ export function EditorScreen() {
       <Screen>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           <Link href="/chat" asChild>
-            <ActionButton tone="primary">Agent</ActionButton>
+            <ActionButton tone="primary" accessibilityLabel="Open agent chat" testID="mobile-editor-open-agent">Agent</ActionButton>
           </Link>
           <Link href="/diff" asChild>
-            <ActionButton>Diff</ActionButton>
+            <ActionButton accessibilityLabel="Open diff review" testID="mobile-editor-open-diff">Diff</ActionButton>
           </Link>
           <Link href="/build" asChild>
-            <ActionButton>Build</ActionButton>
+            <ActionButton accessibilityLabel="Open build runner" testID="mobile-editor-open-build">Build</ActionButton>
+          </Link>
+          <Link href="/git" asChild>
+            <ActionButton accessibilityLabel="Open Git publish" testID="mobile-editor-open-git">Git</ActionButton>
           </Link>
           <ActionButton
+            accessibilityLabel="Save active file"
+            testID="mobile-editor-save"
             onPress={() => {
               void saveActiveFile();
             }}
@@ -44,9 +49,15 @@ export function EditorScreen() {
           </Text>
         ) : null}
 
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
+        <View testID="mobile-editor-file-tree" style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.sm }}>
           {files.map((file) => (
-            <ActionButton key={file.path} tone={file.path === activePath ? "primary" : "secondary"} onPress={() => setActivePath(file.path)}>
+            <ActionButton
+              key={file.path}
+              tone={file.path === activePath ? "primary" : "secondary"}
+              accessibilityLabel={`Open file ${file.path}`}
+              testID={`mobile-editor-file-${file.path.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+              onPress={() => setActivePath(file.path)}
+            >
               {file.path}
             </ActionButton>
           ))}
@@ -66,6 +77,8 @@ export function EditorScreen() {
           </View>
           <TextInput
             multiline
+            accessibilityLabel="Active file editor"
+            testID="mobile-editor-text-input"
             value={activeFile?.text ?? ""}
             onChangeText={updateActiveFile}
             editable={Boolean(activeFile)}

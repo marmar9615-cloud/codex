@@ -1,0 +1,19 @@
+appId: ${MAESTRO_APP_ID}
+---
+- launchApp
+- tapOn:
+    id: "mobile-project-list-import"
+- assertVisible: "Import"
+- tapOn:
+    id: "mobile-import-git-openai-codex-mobile-sample"
+- assertVisible: "Editor"
+- tapOn:
+    id: "mobile-editor-open-git"
+- assertVisible: "Git"
+- tapOn:
+    id: "mobile-git-commit"
+- tapOn:
+    id: "mobile-git-push"
+- tapOn:
+    id: "mobile-git-pr-plan"
+- assertVisible: "Mobile Codex changes"

@@ -1,0 +1,11 @@
+appId: ${MAESTRO_APP_ID}
+---
+- launchApp
+- assertVisible: "Codex Mobile"
+- tapOn:
+    id: "mobile-project-list-new-sample"
+- assertVisible: "Editor"
+- assertVisible:
+    id: "mobile-editor-file-tree"
+- tapOn:
+    id: "mobile-editor-save"

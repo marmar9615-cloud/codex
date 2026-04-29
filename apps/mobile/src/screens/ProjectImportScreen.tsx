@@ -54,6 +54,8 @@ export function ProjectImportScreen() {
             {title === "App workspace" ? (
               <ActionButton
                 tone="primary"
+                accessibilityLabel="Create sample workspace"
+                testID="mobile-import-create-sample"
                 onPress={() => {
                   void createSampleProject().then(() => router.push("/editor"));
                 }}
@@ -62,12 +64,14 @@ export function ProjectImportScreen() {
               </ActionButton>
             ) : title === "GitHub repo" ? (
               <View style={{ gap: spacing.sm }}>
-                <ActionButton onPress={() => void refreshGitRepositories()}>Refresh Repos</ActionButton>
+                <ActionButton accessibilityLabel="Refresh Git repositories" testID="mobile-import-refresh-git" onPress={() => void refreshGitRepositories()}>Refresh Repos</ActionButton>
                 {gitAvailable && gitRepositories.length > 0 ? (
                   gitRepositories.map((repository) => (
                     <ActionButton
                       key={repository.id}
                       tone="primary"
+                      accessibilityLabel={`Import fake repository ${repository.fullName}`}
+                      testID={`mobile-import-git-${repository.owner}-${repository.name}`}
                       onPress={() => {
                         void importGitHubRepository(repository.owner, repository.name, repository.defaultBranch).then((project) => {
                           if (project) {

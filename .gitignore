@@ -68,6 +68,19 @@ apply_patch/
 # coverage
 coverage/
 
+# mobile QA / E2E artifacts
+test-results/
+playwright-report/
+maestro-results/
+.maestro-results/
+qa-screenshots/
+qa-videos/
+qa-logs/
+*.maestro.log
+
+# accidental local editor duplicates should not enter source builds
+* 2.ts
+
 # personal files
 personal/
 

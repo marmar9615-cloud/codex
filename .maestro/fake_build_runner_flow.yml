@@ -1,0 +1,13 @@
+appId: ${MAESTRO_APP_ID}
+---
+- launchApp
+- tapOn:
+    id: "mobile-project-list-new-sample"
+- tapOn:
+    id: "mobile-editor-open-build"
+- assertVisible: "Runner"
+- tapOn:
+    id: "mobile-build-start-pnpm_test"
+- assertVisible:
+    id: "mobile-build-runner-logs"
+- assertVisible: "Artifacts"

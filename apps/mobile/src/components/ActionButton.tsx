@@ -7,9 +7,11 @@ type ActionButtonProps = {
   onPress?: () => void;
   tone?: "primary" | "secondary" | "danger";
   disabled?: boolean;
+  accessibilityLabel?: string;
+  testID?: string;
 };
 
-export function ActionButton({ children, onPress, tone = "secondary", disabled = false }: ActionButtonProps) {
+export function ActionButton({ children, onPress, tone = "secondary", disabled = false, accessibilityLabel, testID }: ActionButtonProps) {
   const backgroundColor =
     tone === "primary" ? colors.accent : tone === "danger" ? colors.danger : colors.surfaceAlt;
   const color = tone === "secondary" ? colors.text : "#ffffff";
@@ -18,6 +20,9 @@ export function ActionButton({ children, onPress, tone = "secondary", disabled =
     <Pressable
       onPress={onPress}
       disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      testID={testID}
       style={({ pressed }) => ({
         minHeight: 44,
         borderRadius: 8,

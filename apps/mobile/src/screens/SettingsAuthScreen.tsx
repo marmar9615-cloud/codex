@@ -33,6 +33,9 @@ export function SettingsAuthScreen() {
       <Screen>
         <View style={{ gap: spacing.sm }}>
           <StatusPill label={state.status} tone={statusTone} />
+          <Text testID="mobile-auth-gated-status" selectable style={{ color: colors.muted, lineHeight: 20 }}>
+            Production ChatGPT/Codex sign-in status: gated.
+          </Text>
           <Text selectable style={{ color: colors.text, fontSize: 18, fontWeight: "800" }}>
             ChatGPT/Codex account
           </Text>
@@ -47,6 +50,8 @@ export function SettingsAuthScreen() {
           ) : null}
           <ActionButton
             tone="primary"
+            accessibilityLabel="Continue with ChatGPT Codex account"
+            testID="mobile-auth-continue"
             onPress={() =>
               setState((current) => reduceMobileAuthState(current, { type: "startChatgpt" }, authFeatureFlags))
             }
@@ -88,6 +93,8 @@ export function SettingsAuthScreen() {
             }}
           />
           <ActionButton
+            accessibilityLabel="Enable dev API key mode"
+            testID="mobile-auth-enable-dev-key"
             onPress={() =>
               setState((current) => reduceMobileAuthState(current, { type: "enableDevApiKey" }, authFeatureFlags))
             }
@@ -121,7 +128,7 @@ export function SettingsAuthScreen() {
           <Text selectable style={{ color: colors.muted, lineHeight: 20 }}>
             Bridge transports: {runnerCapabilities?.supportedTransports.join(", ") ?? "unavailable"}. Sandbox backends: {runnerCapabilities?.sandboxBackends.join(", ") ?? "unavailable"}. Phone-side execution: no.
           </Text>
-          <ActionButton onPress={() => void refreshRunnerCapabilities()}>Refresh Capabilities</ActionButton>
+          <ActionButton accessibilityLabel="Refresh runner capabilities" testID="mobile-auth-refresh-capabilities" onPress={() => void refreshRunnerCapabilities()}>Refresh Capabilities</ActionButton>
         </View>
 
         <View

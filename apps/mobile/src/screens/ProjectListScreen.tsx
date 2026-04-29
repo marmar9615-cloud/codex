@@ -24,6 +24,8 @@ export function ProjectListScreen() {
         <View style={{ flexDirection: "row", gap: spacing.sm, flexWrap: "wrap" }}>
           <ActionButton
             tone="primary"
+            accessibilityLabel="Create sample project"
+            testID="mobile-project-list-new-sample"
             onPress={() => {
               void createSampleProject().then(() => router.push("/editor"));
             }}
@@ -31,16 +33,16 @@ export function ProjectListScreen() {
             New Sample
           </ActionButton>
           <Link href="/import" asChild>
-            <ActionButton>Import</ActionButton>
+            <ActionButton accessibilityLabel="Open project import" testID="mobile-project-list-import">Import</ActionButton>
           </Link>
           <Link href="/settings-auth" asChild>
-            <ActionButton>Auth</ActionButton>
+            <ActionButton accessibilityLabel="Open auth settings" testID="mobile-project-list-auth">Auth</ActionButton>
           </Link>
           <Link href="/build" asChild>
-            <ActionButton>Runner</ActionButton>
+            <ActionButton accessibilityLabel="Open build runner" testID="mobile-project-list-runner">Runner</ActionButton>
           </Link>
           <Link href="/git" asChild>
-            <ActionButton>Git</ActionButton>
+            <ActionButton accessibilityLabel="Open Git publish" testID="mobile-project-list-git">Git</ActionButton>
           </Link>
         </View>
 

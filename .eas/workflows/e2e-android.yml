@@ -1,0 +1,30 @@
+name: Mobile Android E2E
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "apps/mobile/**"
+      - "packages/mobile-protocol/**"
+      - "services/mobile-runner/**"
+      - ".maestro/**"
+
+jobs:
+  build_android_e2e:
+    name: Build Android APK for E2E
+    type: build
+    params:
+      platform: android
+      profile: e2e-simulator
+
+  maestro_android:
+    name: Run Maestro Android flows
+    needs: [build_android_e2e]
+    type: maestro
+    params:
+      build_id: ${{ needs.build_android_e2e.outputs.build_id }}
+      flow_path:
+        - .maestro/sample_project_flow.yml
+        - .maestro/fake_agent_patch_flow.yml
+        - .maestro/fake_build_runner_flow.yml
+        - .maestro/fake_git_publish_flow.yml

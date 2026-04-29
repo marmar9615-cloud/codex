@@ -1,0 +1,18 @@
+appId: ${MAESTRO_APP_ID}
+---
+- launchApp
+- tapOn:
+    id: "mobile-project-list-new-sample"
+- tapOn:
+    id: "mobile-editor-open-agent"
+- assertVisible: "Agent"
+- tapOn:
+    id: "mobile-agent-start-fake-job"
+- assertVisible:
+    id: "mobile-agent-chat-logs"
+- tapOn:
+    id: "mobile-agent-review-patch"
+- assertVisible: "Diff"
+- tapOn:
+    id: "mobile-diff-apply-patch"
+- assertVisible: "accepted"

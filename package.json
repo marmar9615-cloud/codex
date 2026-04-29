@@ -5,6 +5,9 @@
   "scripts": {
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
+    "test:mobile:all": "node scripts/mobile-test-all.mjs",
+    "test:mobile:e2e:maestro:check": "node scripts/mobile-maestro-check.mjs",
+    "mobile:qa-report": "node scripts/mobile-qa-report.mjs",
     "write-hooks-schema": "cargo run --manifest-path ./codex-rs/Cargo.toml -p codex-hooks --bin write_hooks_schema_fixtures"
   },
   "devDependencies": {
