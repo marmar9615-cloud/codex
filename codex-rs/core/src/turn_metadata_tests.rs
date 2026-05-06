@@ -2,20 +2,29 @@ use super::*;
 
 use crate::sandbox_tags::sandbox_tag;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio::process::Command;
 
+fn test_mcp_turn_metadata_context() -> McpTurnMetadataContext<'static> {
+    McpTurnMetadataContext {
+        model: "gpt-5.4",
+        reasoning_effort: Some(ReasoningEffortConfig::High),
+    }
+}
+
 #[tokio::test]
 async fn build_turn_metadata_header_includes_has_changes_for_clean_repo() {
     let temp_dir = TempDir::new().expect("temp dir");
-    let repo_path = temp_dir.path().join("repo").abs();
+    let repo_path = temp_dir.path().join("repo-東京").abs();
     std::fs::create_dir_all(&repo_path).expect("create repo");
 
     Command::new("git")
@@ -54,7 +63,16 @@ async fn build_turn_metadata_header_includes_has_changes_for_clean_repo() {
     let header = build_turn_metadata_header(&repo_path, Some("none"))
         .await
         .expect("header");
+    assert!(header.is_ascii());
+    assert!(!header.contains("東京"));
     let parsed: Value = serde_json::from_str(&header).expect("valid json");
+    let expected_repo_path = repo_path.to_string_lossy().into_owned();
+    let actual_repo_path = parsed
+        .get("workspaces")
+        .and_then(Value::as_object)
+        .and_then(|workspaces| workspaces.keys().next())
+        .expect("workspace path");
+    assert_eq!(actual_repo_path, &expected_repo_path);
     let workspace = parsed
         .get("workspaces")
         .and_then(Value::as_object)
@@ -149,6 +167,50 @@ fn turn_metadata_state_includes_turn_started_at_unix_ms_after_start() {
 }
 
 #[test]
+fn turn_metadata_state_includes_model_and_reasoning_effort_only_in_request_meta() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let cwd = temp_dir.path().abs();
+    let permission_profile = PermissionProfile::read_only();
+
+    let state = TurnMetadataState::new(
+        "session-a".to_string(),
+        &SessionSource::Exec,
+        "turn-a".to_string(),
+        cwd,
+        &permission_profile,
+        WindowsSandboxLevel::Disabled,
+        /*enforce_managed_network*/ false,
+    );
+
+    let header = state.current_header_value().expect("header");
+    let header_json: Value = serde_json::from_str(&header).expect("json");
+    assert!(header_json.get("model").is_none());
+    assert!(header_json.get("reasoning_effort").is_none());
+
+    let meta = state
+        .current_meta_value_for_mcp_request(test_mcp_turn_metadata_context())
+        .expect("turn metadata should be present");
+    assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
+
+    let meta_without_reasoning_effort = state
+        .current_meta_value_for_mcp_request(McpTurnMetadataContext {
+            model: "gpt-5.4",
+            reasoning_effort: None,
+        })
+        .expect("turn metadata should be present");
+    assert_eq!(
+        meta_without_reasoning_effort["model"].as_str(),
+        Some("gpt-5.4")
+    );
+    assert!(
+        meta_without_reasoning_effort
+            .get("reasoning_effort")
+            .is_none()
+    );
+}
+
+#[test]
 fn turn_metadata_state_ignores_client_turn_started_at_unix_ms_before_start() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
@@ -191,6 +253,12 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     );
     state.set_responsesapi_client_metadata(HashMap::from([
         ("fiber_run_id".to_string(), "fiber-123".to_string()),
+        ("origin".to_string(), "東京".to_string()),
+        ("model".to_string(), "client-supplied".to_string()),
+        (
+            "reasoning_effort".to_string(),
+            "client-supplied".to_string(),
+        ),
         ("session_id".to_string(), "client-supplied".to_string()),
         ("thread_source".to_string(), "client-supplied".to_string()),
         (
@@ -201,9 +269,14 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     state.set_turn_started_at_unix_ms(/*turn_started_at_unix_ms*/ 1_700_000_000_123);
 
     let header = state.current_header_value().expect("header");
+    assert!(header.is_ascii());
+    assert!(!header.contains("東京"));
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert_eq!(json["fiber_run_id"].as_str(), Some("fiber-123"));
+    assert_eq!(json["origin"].as_str(), Some("東京"));
+    assert_eq!(json["model"].as_str(), Some("client-supplied"));
+    assert_eq!(json["reasoning_effort"].as_str(), Some("client-supplied"));
     assert_eq!(json["session_id"].as_str(), Some("session-a"));
     assert_eq!(json["thread_source"].as_str(), Some("user"));
     assert_eq!(json["turn_id"].as_str(), Some("turn-a"));
@@ -211,4 +284,10 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         json["turn_started_at_unix_ms"].as_i64(),
         Some(1_700_000_000_123)
     );
+
+    let meta = state
+        .current_meta_value_for_mcp_request(test_mcp_turn_metadata_context())
+        .expect("turn metadata should be present");
+    assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
 }

@@ -39,7 +39,6 @@ use crate::token_data::parse_jwt_expiration;
 use codex_client::CodexHttpClient;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_protocol::account::PlanType as AccountPlanType;
-use codex_protocol::auth::KnownPlan as InternalKnownPlan;
 use codex_protocol::auth::PlanType as InternalPlanType;
 use codex_protocol::auth::RefreshTokenFailedError;
 use codex_protocol::auth::RefreshTokenFailedReason;
@@ -380,29 +379,10 @@ impl CodexAuth {
             return Some(auth.plan_type());
         }
 
-        let map_known = |kp: &InternalKnownPlan| match kp {
-            InternalKnownPlan::Free => AccountPlanType::Free,
-            InternalKnownPlan::Go => AccountPlanType::Go,
-            InternalKnownPlan::Plus => AccountPlanType::Plus,
-            InternalKnownPlan::Pro => AccountPlanType::Pro,
-            InternalKnownPlan::ProLite => AccountPlanType::ProLite,
-            InternalKnownPlan::Team => AccountPlanType::Team,
-            InternalKnownPlan::SelfServeBusinessUsageBased => {
-                AccountPlanType::SelfServeBusinessUsageBased
-            }
-            InternalKnownPlan::Business => AccountPlanType::Business,
-            InternalKnownPlan::EnterpriseCbpUsageBased => AccountPlanType::EnterpriseCbpUsageBased,
-            InternalKnownPlan::Enterprise => AccountPlanType::Enterprise,
-            InternalKnownPlan::Edu => AccountPlanType::Edu,
-        };
-
         self.get_current_token_data().map(|t| {
             t.id_token
                 .chatgpt_plan_type
-                .map(|pt| match pt {
-                    InternalPlanType::Known(k) => map_known(&k),
-                    InternalPlanType::Unknown(_) => AccountPlanType::Unknown,
-                })
+                .map(AccountPlanType::from)
                 .unwrap_or(AccountPlanType::Unknown)
         })
     }
@@ -484,7 +464,7 @@ impl ChatgptAuth {
 
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
 pub const CODEX_API_KEY_ENV_VAR: &str = "CODEX_API_KEY";
-pub const CODEX_AGENT_IDENTITY_ENV_VAR: &str = "CODEX_AGENT_IDENTITY";
+pub const CODEX_ACCESS_TOKEN_ENV_VAR: &str = "CODEX_ACCESS_TOKEN";
 
 pub fn read_openai_api_key_from_env() -> Option<String> {
     env::var(OPENAI_API_KEY_ENV_VAR)
@@ -494,14 +474,15 @@ pub fn read_openai_api_key_from_env() -> Option<String> {
 }
 
 pub fn read_codex_api_key_from_env() -> Option<String> {
-    env::var(CODEX_API_KEY_ENV_VAR)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    read_non_empty_env_var(CODEX_API_KEY_ENV_VAR)
 }
 
-pub fn read_codex_agent_identity_from_env() -> Option<String> {
-    env::var(CODEX_AGENT_IDENTITY_ENV_VAR)
+pub fn read_codex_access_token_from_env() -> Option<String> {
+    read_non_empty_env_var(CODEX_ACCESS_TOKEN_ENV_VAR)
+}
+
+fn read_non_empty_env_var(key: &str) -> Option<String> {
+    env::var(key)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -560,10 +541,10 @@ pub fn login_with_api_key(
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
 
-/// Writes an `auth.json` that contains only the Agent Identity token.
-pub async fn login_with_agent_identity(
+/// Writes an `auth.json` that contains only the access token.
+pub async fn login_with_access_token(
     codex_home: &Path,
-    agent_identity: &str,
+    access_token: &str,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     chatgpt_base_url: Option<&str>,
 ) -> std::io::Result<()> {
@@ -571,13 +552,13 @@ pub async fn login_with_agent_identity(
         .unwrap_or(DEFAULT_CHATGPT_BACKEND_BASE_URL)
         .trim_end_matches('/')
         .to_string();
-    verified_agent_identity_record(agent_identity, &base_url).await?;
+    verified_agent_identity_record(access_token, &base_url).await?;
     let auth_dot_json = AuthDotJson {
         auth_mode: Some(ApiAuthMode::AgentIdentity),
         openai_api_key: None,
         tokens: None,
         last_refresh: None,
-        agent_identity: Some(agent_identity.to_string()),
+        agent_identity: Some(access_token.to_string()),
     };
     save_auth(codex_home, &auth_dot_json, auth_credentials_store_mode)
 }
@@ -773,7 +754,7 @@ async fn load_auth(
         return Ok(None);
     }
 
-    if let Some(agent_identity) = read_codex_agent_identity_from_env() {
+    if let Some(agent_identity) = read_codex_access_token_from_env() {
         return CodexAuth::from_agent_identity_jwt(&agent_identity, chatgpt_base_url)
             .await
             .map(Some);
